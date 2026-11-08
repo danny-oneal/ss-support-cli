@@ -4,3 +4,4 @@
 //! first: the semantic JSON [`diff`] engine, then the operations layer.
 
 pub mod diff;
+pub mod jsonutil;
