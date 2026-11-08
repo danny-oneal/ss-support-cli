@@ -35,8 +35,15 @@ Global flags work before or after the subcommand.
 | `-v, --verbose` | | step progress on stderr |
 | `--no-cache` | | bypasses the local object-version cache |
 | `--preset NAME` (`ss run`) | | loads a saved param set; flags given on the command line win |
-| `--save-preset NAME` (`ss run`) | | after a successful run, saves the params given (not the defaults) |
+| `--save-preset NAME` (`ss run`) | | after a successful run, saves the params given (not the defaults); with none given, exits 2 before running |
+
+Op flags take values that start with a hyphen (`--repeat -1`); a flag given
+twice takes its last value.
 
 Exit codes: `0` ok (including `--dry-run`) · `1` the operation failed, was
-denied, or was declined · `2` usage or config error · `130` interrupted by
-Ctrl-C.
+denied, or was declined, or a file could not be read or written · `2` usage
+error (bad flag or param value, unknown operation or format, missing required
+param, unknown preset, nothing to save with `--save-preset`) or an unparsable
+config/presets file · `130` interrupted by Ctrl-C, SIGTERM, or SIGHUP (a second
+signal exits at once). A failed audit-log write is a `warning:` line on stderr
+and does not change the exit code.
