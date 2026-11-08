@@ -3,7 +3,10 @@
 //! [`Operation`] trait with its [`Param`] declarations, shared [`Deps`], and
 //! [`Registry`].
 
+use std::sync::Arc;
+
 mod confirm;
+pub mod demo;
 mod input;
 mod operation;
 mod registry;
@@ -18,3 +21,26 @@ pub use runner::{
     FailureKind, Progress, RunFailure, Runner, RunnerError, StepStatus, find_cause, with_defaults,
 };
 pub use view::{Node, OpResult, View};
+
+/// The registry of every operation that ships with the tool.
+pub fn builtin() -> Registry {
+    let mut registry = Registry::new();
+    registry
+        .register(Arc::new(demo::Hello))
+        .expect("builtin operation ids are unique");
+    registry
+        .register(Arc::new(demo::JsonDiff))
+        .expect("builtin operation ids are unique");
+    registry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_registers_the_demo_ops() {
+        let ids: Vec<_> = builtin().all().iter().map(|op| op.meta().id).collect();
+        assert_eq!(ids, ["demo.hello", "demo.json-diff"]);
+    }
+}
