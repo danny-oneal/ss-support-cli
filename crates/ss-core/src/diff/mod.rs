@@ -7,6 +7,10 @@
 use serde::Serialize;
 use serde_json::Value;
 
+pub mod path;
+
+pub use path::{Path, Segment};
+
 /// How a single value changed between the left and right documents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Kind {
@@ -19,30 +23,6 @@ pub enum Kind {
     /// Present on both but with a different JSON type (e.g. `"5"` → `5`).
     TypeChanged,
 }
-
-/// One step in a [`Path`] from the document root to a changed value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum Segment {
-    /// An object member accessed by key.
-    Key(String),
-    /// An array element accessed by position.
-    Index(usize),
-    /// An array element matched by an identity field rather than position.
-    MatchKey {
-        /// The identity field named by the array-match rule.
-        field: String,
-        /// That field's value on the matched element, as text.
-        value: String,
-    },
-}
-
-/// A typed path from the document root to a changed value.
-///
-/// Stored as structured segments rather than a pre-rendered string so that
-/// ignore rules can match structurally and the exporter can render either
-/// dotted notation or JSONPath from the same value.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct Path(pub Vec<Segment>);
 
 /// A single difference between the two documents.
 #[derive(Debug, Clone, PartialEq, Serialize)]
