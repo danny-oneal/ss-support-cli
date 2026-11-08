@@ -350,7 +350,8 @@ impl Runner {
     /// [`Runner::step`] for state-changing work. A dry run stops here, before
     /// anything changes. The first mutating step of a run collects the
     /// operator's confirmation; `--yes` covers mutating operations but never
-    /// destructive ones, and a missing confirmer fails closed.
+    /// destructive ones, and a missing confirmer fails closed. Cancelling the
+    /// run while the operator is being asked stops it at once.
     pub async fn mutate<F, Fut, T>(&mut self, name: &str, f: F) -> anyhow::Result<T>
     where
         F: FnOnce(CancellationToken) -> Fut,
@@ -361,13 +362,27 @@ impl Runner {
             return Err(RunnerError::DryRun.into());
         }
         if !self.state.confirmed {
-            if let Err(e) = self.confirm(name).await {
+            if let Err(e) = self.confirm_unless_cancelled(name).await {
                 self.emit(name, StepStatus::Skipped, Duration::ZERO, None);
                 return Err(e);
             }
             self.state.confirmed = true;
         }
         self.step(name, f).await
+    }
+
+    /// [`Runner::confirm`], abandoned as soon as the run is cancelled; a run
+    /// cancelled beforehand never asks at all.
+    async fn confirm_unless_cancelled(&self, step: &str) -> anyhow::Result<()> {
+        let cancelled = || anyhow::Error::new(RunnerError::Cancelled).context(step.to_owned());
+        if self.token.is_cancelled() {
+            return Err(cancelled());
+        }
+        tokio::select! {
+            biased;
+            () = self.token.cancelled() => Err(cancelled()),
+            r = self.confirm(step) => r,
+        }
     }
 
     async fn confirm(&self, step: &str) -> anyhow::Result<()> {

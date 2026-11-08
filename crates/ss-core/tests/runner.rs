@@ -635,3 +635,52 @@ async fn dry_run_skips_confirmation_entirely() {
     assert_eq!(entries[0].outcome, Outcome::DryRun);
     assert_eq!(entries[0].error, None);
 }
+
+struct NeverAnswers;
+
+#[async_trait]
+impl Confirmer for NeverAnswers {
+    async fn confirm(&self, _spec: ConfirmSpec) -> anyhow::Result<bool> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn cancel_during_confirmation_is_prompt() {
+    let op = writer(Class::Mutate);
+    let audit = Arc::new(RecordingAudit::default());
+    let mut runner = Runner::new(Deps::default())
+        .confirmer(Arc::new(NeverAnswers))
+        .audit(audit.clone());
+    let token = runner.cancel_token();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        token.cancel();
+    });
+
+    let f = tokio::time::timeout(
+        Duration::from_secs(1),
+        runner.execute(&op, Input::default()),
+    )
+    .await
+    .expect("cancellation interrupts the prompt within a second")
+    .unwrap_err();
+    assert_eq!(f.kind, FailureKind::Cancelled);
+    assert_eq!(format!("{:#}", f.error), "write one: cancelled");
+    assert_eq!(op.mutated.load(Ordering::SeqCst), 0);
+    let entries = audit.entries.lock().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].outcome, Outcome::Error);
+}
+
+#[tokio::test]
+async fn cancelled_before_confirmation_never_prompts() {
+    let op = writer(Class::Mutate);
+    let confirmer = RecordingConfirmer::new(Ok(true));
+    let mut runner = Runner::new(Deps::default()).confirmer(confirmer.clone());
+    runner.cancel_token().cancel();
+    let f = runner.execute(&op, Input::default()).await.unwrap_err();
+    assert_eq!(f.kind, FailureKind::Cancelled);
+    assert!(confirmer.specs.lock().unwrap().is_empty());
+    assert_eq!(op.mutated.load(Ordering::SeqCst), 0);
+}
