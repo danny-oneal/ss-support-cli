@@ -66,22 +66,30 @@ pub struct Change {
 }
 
 /// Renders both dotted and JSONPath forms so `-o json` output is directly
-/// consumable; absent sides are omitted rather than written as `null`.
+/// consumable; absent and null sides are omitted, as Go's `omitempty` does.
 impl Serialize for Change {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        let n = 3 + usize::from(self.old.is_some()) + usize::from(self.new.is_some());
+        // Go's `omitempty` on an `any` drops a nil interface, and a decoded
+        // JSON null *is* nil, so an explicit null side is omitted too.
+        let (old, new) = (non_null(&self.old), non_null(&self.new));
+        let n = 3 + usize::from(old.is_some()) + usize::from(new.is_some());
         let mut st = ser.serialize_struct("Change", n)?;
         st.serialize_field("path", &self.path.dotted())?;
         st.serialize_field("jsonpath", &self.path.jsonpath())?;
         st.serialize_field("kind", &self.kind)?;
-        if let Some(old) = &self.old {
+        if let Some(old) = old {
             st.serialize_field("old", old)?;
         }
-        if let Some(new) = &self.new {
+        if let Some(new) = new {
             st.serialize_field("new", new)?;
         }
         st.end()
     }
+}
+
+/// A side of a change that Go's `omitempty` would keep: present and not null.
+fn non_null(v: &Option<Value>) -> Option<&Value> {
+    v.as_ref().filter(|v| !v.is_null())
 }
 
 /// The result of diffing two documents: changes sorted by path, plus stats.
@@ -703,6 +711,29 @@ mod tests {
         assert_eq!(
             v["stats"],
             json!({"added": 1, "removed": 1, "changed": 1, "type_changed": 0})
+        );
+    }
+
+    #[test]
+    fn change_omits_sides_that_are_json_null_like_go_omitempty() {
+        // Go's `any` nil covers a decoded JSON null, so `omitempty` drops it.
+        let delta = json(
+            &json!({"count": 5, "flag": null}),
+            &json!({"count": null, "flag": true, "n": null}),
+            &Opts::default(),
+        );
+        let v = serde_json::to_value(&delta).unwrap();
+        assert_eq!(
+            v["changes"][0],
+            json!({"path": "count", "jsonpath": "$.count", "kind": "changed", "old": 5})
+        );
+        assert_eq!(
+            v["changes"][1],
+            json!({"path": "flag", "jsonpath": "$.flag", "kind": "changed", "new": true})
+        );
+        assert_eq!(
+            v["changes"][2],
+            json!({"path": "n", "jsonpath": "$.n", "kind": "added"})
         );
     }
 }

@@ -78,7 +78,8 @@ fn go_number(f: f64) -> Number {
 
 /// Formats a number the way Go's `encoding/json` does: shortest round-trip
 /// digits, plain notation for `1e-6 <= |x| < 1e21`, otherwise exponent form
-/// with an explicit sign and at least two exponent digits (`1e+21`, `1e-07`).
+/// with an explicit sign; positive exponents are zero-padded to two digits
+/// (`1e+21`) and negative ones are not (`1e-7`).
 pub fn fmt_number(n: &Number) -> String {
     if let Some(i) = n.as_i64() {
         return i.to_string();
@@ -91,11 +92,13 @@ pub fn fmt_number(n: &Number) -> String {
     if abs != 0.0 && !(1e-6..1e21).contains(&abs) {
         let s = format!("{f:e}");
         let (mantissa, exp) = s.split_once('e').unwrap_or((&s, "0"));
-        let (sign, digits) = match exp.strip_prefix('-') {
-            Some(d) => ('-', d),
-            None => ('+', exp),
+        // encoding/json keeps strconv's two-digit positive exponents (`e+21`)
+        // but strips the leading zero from small negative ones (`e-7`, not
+        // `e-07`).
+        return match exp.strip_prefix('-') {
+            Some(d) => format!("{mantissa}e-{d}"),
+            None => format!("{mantissa}e+{exp:0>2}"),
         };
-        return format!("{mantissa}e{sign}{digits:0>2}");
     }
     format!("{f}")
 }
@@ -256,7 +259,13 @@ mod tests {
         assert_eq!(canonical(&json!(0.123456)), "0.123456");
         assert_eq!(canonical(&json!(-0.0)), "-0");
         assert_eq!(canonical(&json!(0.000001)), "0.000001");
-        assert_eq!(canonical(&json!(1e-7)), "1e-07");
+        // encoding/json strips the zero-pad strconv adds to small negative
+        // exponents: 1e-07 → 1e-7. Positive exponents keep two digits.
+        assert_eq!(canonical(&json!(1e-7)), "1e-7");
+        assert_eq!(canonical(&json!(2.5e-8)), "2.5e-8");
+        assert_eq!(canonical(&json!(-1e-7)), "-1e-7");
+        assert_eq!(canonical(&json!(1e-10)), "1e-10");
+        assert_eq!(canonical(&json!(1e-100)), "1e-100");
         assert_eq!(canonical(&json!(1e21)), "1e+21");
         assert_eq!(
             canonical(&json!(123456789012345680000.0)),
