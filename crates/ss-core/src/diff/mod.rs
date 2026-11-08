@@ -6,6 +6,7 @@
 
 pub mod glob;
 pub mod json;
+pub mod lcs;
 pub mod opts;
 pub mod path;
 
