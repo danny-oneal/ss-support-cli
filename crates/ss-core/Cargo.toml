@@ -12,6 +12,8 @@ name = "ss_core"
 path = "src/lib.rs"
 
 [dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
 chrono.workspace = true
 globset.workspace = true
 serde.workspace = true
@@ -20,9 +22,8 @@ serde_yaml_ng.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
-anyhow.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 
 [lints]
 workspace = true
