@@ -9,8 +9,12 @@ pub mod json;
 pub mod lcs;
 pub mod opts;
 pub mod path;
+pub mod stats;
+pub mod text;
 
 pub use glob::{GlobError, PathGlob, compile_globs};
-pub use json::{Change, Delta, Kind, Stats, json};
+pub use json::{Change, Delta, Kind, json};
 pub use opts::Opts;
 pub use path::{Path, Segment};
+pub use stats::Stats;
+pub use text::text;

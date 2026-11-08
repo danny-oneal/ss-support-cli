@@ -1,7 +1,10 @@
 //! The structural walk: objects by key-set union, arrays by identity key or
 //! LCS, scalars by typed compare.
 
+use std::fmt;
+
 use serde::Serialize;
+use serde::ser::SerializeStruct;
 use serde_json::Value;
 
 use std::collections::BTreeMap;
@@ -10,6 +13,7 @@ use crate::diff::glob::{PathGlob, compile_globs};
 use crate::diff::lcs;
 use crate::diff::opts::Opts;
 use crate::diff::path::{Path, Segment};
+use crate::diff::stats::Stats;
 use crate::jsonutil;
 
 /// How a single value changed between the left and right documents.
@@ -18,6 +22,7 @@ use crate::jsonutil;
 /// is a schema bug, not a value edit, and support engineers need to see the
 /// difference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Kind {
     /// Present on the right, absent on the left.
     Added,
@@ -29,8 +34,26 @@ pub enum Kind {
     TypeChanged,
 }
 
+impl Kind {
+    /// The lowercase, hyphenated name used in output: `type-changed`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Added => "added",
+            Kind::Removed => "removed",
+            Kind::Changed => "changed",
+            Kind::TypeChanged => "type-changed",
+        }
+    }
+}
+
+impl fmt::Display for Kind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A single difference between the two documents.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Change {
     /// Location of the change.
     pub path: Path,
@@ -42,17 +65,23 @@ pub struct Change {
     pub new: Option<Value>,
 }
 
-/// Running counts of changes by kind.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-pub struct Stats {
-    /// Count of [`Kind::Added`] changes.
-    pub added: usize,
-    /// Count of [`Kind::Removed`] changes.
-    pub removed: usize,
-    /// Count of [`Kind::Changed`] changes.
-    pub changed: usize,
-    /// Count of [`Kind::TypeChanged`] changes.
-    pub type_changed: usize,
+/// Renders both dotted and JSONPath forms so `-o json` output is directly
+/// consumable; absent sides are omitted rather than written as `null`.
+impl Serialize for Change {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        let n = 3 + usize::from(self.old.is_some()) + usize::from(self.new.is_some());
+        let mut st = ser.serialize_struct("Change", n)?;
+        st.serialize_field("path", &self.path.dotted())?;
+        st.serialize_field("jsonpath", &self.path.jsonpath())?;
+        st.serialize_field("kind", &self.kind)?;
+        if let Some(old) = &self.old {
+            st.serialize_field("old", old)?;
+        }
+        if let Some(new) = &self.new {
+            st.serialize_field("new", new)?;
+        }
+        st.end()
+    }
 }
 
 /// The result of diffing two documents: changes sorted by path, plus stats.
@@ -632,5 +661,48 @@ mod tests {
         // `other` is unkeyed: the single element pairs positionally and diffs nested.
         assert_eq!(delta.changes.len(), 1);
         assert_eq!(delta.changes[0].path.dotted(), "other[0].id");
+    }
+
+    #[test]
+    fn kind_displays_as_lowercase_hyphenated() {
+        assert_eq!(Kind::Added.to_string(), "added");
+        assert_eq!(Kind::Removed.to_string(), "removed");
+        assert_eq!(Kind::Changed.to_string(), "changed");
+        assert_eq!(Kind::TypeChanged.to_string(), "type-changed");
+    }
+
+    #[test]
+    fn changes_are_sorted_by_dotted_path() {
+        let a = json!({"z": 1, "a": {"y": 1, "b": 1}, "m": [1, 2]});
+        let b = json!({"z": 2, "a": {"y": 2, "b": 2}, "m": [1, 3]});
+        let delta = json(&a, &b, &Opts::default());
+        let paths: Vec<String> = delta.changes.iter().map(|c| c.path.dotted()).collect();
+        assert_eq!(paths, vec!["a.b", "a.y", "m[1]", "z"]);
+    }
+
+    #[test]
+    fn change_serializes_with_both_path_forms_and_omits_absent_sides() {
+        let delta = json(
+            &json!({"x": 1, "gone": 1}),
+            &json!({"x": 2, "new": 3}),
+            &Opts::default(),
+        );
+        let v = serde_json::to_value(&delta).unwrap();
+        assert_eq!(
+            v["changes"][0],
+            json!({"path": "gone", "jsonpath": "$.gone", "kind": "removed", "old": 1})
+        );
+        assert_eq!(
+            v["changes"][1],
+            json!({"path": "new", "jsonpath": "$.new", "kind": "added", "new": 3})
+        );
+        assert_eq!(
+            v["changes"][2],
+            json!({"path": "x", "jsonpath": "$.x", "kind": "changed", "old": 1, "new": 2})
+        );
+        assert_eq!(
+            v["stats"],
+            json!({"added": 1, "removed": 1, "changed": 1, "type_changed": 0})
+        );
     }
 }
