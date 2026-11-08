@@ -9,6 +9,10 @@ use serde::Deserialize;
 
 use crate::vars::{self, Vars};
 
+pub mod trace;
+
+pub use trace::{TraceConfig, TraceDomain, TraceError};
+
 /// The fully resolved runtime environment an operation runs in.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Environment {
@@ -61,6 +65,8 @@ pub struct File {
     pub environments: BTreeMap<String, EnvSpec>,
     /// Diff rules.
     pub diff: DiffDefaults,
+    /// Record locators for the trace operation.
+    pub trace: TraceConfig,
 }
 
 /// Failure to load the config file.
