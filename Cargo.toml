@@ -20,12 +20,13 @@ serde = { version = "1", features = ["derive"] }
 # No `preserve_order`: sorted keys are what makes jsonutil::canonical canonical.
 serde_json = "1"
 serde_yaml_ng = "0.10"
+sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "process", "io-util", "signal", "time", "fs"] }
 tracing = "0.1"
+tempfile = "3"
 # dev
 insta = "1"
-tempfile = "3"
 
 [workspace.lints.rust]
 unexpected_cfgs = "warn"
