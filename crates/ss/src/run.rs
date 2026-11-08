@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use ss_core::audit::{self, FileLogger, Logger};
 use ss_core::cache;
-use ss_core::config;
+use ss_core::config::{self, ConfigError};
 use ss_core::guard::{EnvAllowlist, Guard};
 use ss_core::ops::Deps;
 use ss_core::preset::{self, PresetError};
@@ -73,6 +73,18 @@ impl From<PresetError> for Failure {
     }
 }
 
+/// An unparsable config file is the user's to fix; failing to read it is
+/// not.
+impl From<ConfigError> for Failure {
+    fn from(e: ConfigError) -> Self {
+        if e.is_usage() {
+            Failure::Usage(e.into())
+        } else {
+            Failure::Failed(e.into())
+        }
+    }
+}
+
 /// Everything a command needs, built once per invocation from the config
 /// file, the global flags, and the environment variables.
 pub(crate) struct App {
@@ -92,8 +104,7 @@ pub(crate) struct App {
 
 impl App {
     fn build(flags: &GlobalFlags, vars: &Vars, cancel: CancellationToken) -> Result<Self, Failure> {
-        let cfg =
-            config::load(&config::default_path(vars)).map_err(|e| Failure::Usage(e.into()))?;
+        let cfg = config::load(&config::default_path(vars))?;
         let env = flags.resolve_env(&cfg, vars);
         let cache: Arc<dyn cache::Store> = if flags.no_cache {
             Arc::new(cache::Nop)

@@ -626,6 +626,20 @@ async fn bad_op_param_value_is_usage() {
 }
 
 #[tokio::test]
+async fn unreadable_config_exits_1() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut services = Services::isolated(root.path());
+    services
+        .vars
+        .insert("SS_CONFIG".to_owned(), root.path().display().to_string());
+    let (exit, out, err) = ss_with(services, &["ss", "ops", "list"]).await;
+    assert_eq!(exit, Exit::Failed);
+    assert!(err.starts_with("ss ops list: read config "), "{err}");
+    assert_eq!(err.lines().count(), 1, "{err}");
+    assert_eq!(out, "");
+}
+
+#[tokio::test]
 async fn audit_write_failure_warns_and_keeps_the_exit_code() {
     let root = tempfile::tempdir().expect("tempdir");
     let (mut services, _) = touch_services(root.path());

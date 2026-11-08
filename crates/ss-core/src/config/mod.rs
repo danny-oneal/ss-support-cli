@@ -92,6 +92,14 @@ pub enum ConfigError {
     },
 }
 
+impl ConfigError {
+    /// Reports whether the failure is the file's content, which the user
+    /// must fix, as opposed to an I/O failure.
+    pub fn is_usage(&self) -> bool {
+        matches!(self, Self::Parse { .. })
+    }
+}
+
 /// Returns the config file location: `SS_CONFIG`, else
 /// `$XDG_CONFIG_HOME/ss/config.yaml`, else `~/.config/ss/config.yaml`.
 pub fn default_path(v: &Vars) -> PathBuf {
@@ -227,6 +235,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let err = load(dir.path()).expect_err("directory is not a file");
         assert!(matches!(err, ConfigError::Read { .. }));
+        assert!(!err.is_usage());
         assert!(err.to_string().starts_with("read config "));
     }
 
@@ -271,6 +280,7 @@ diff:
         let dir = tempfile::tempdir().expect("tempdir");
         let err = load(&write(&dir, "envs: {}\n")).expect_err("unknown key");
         assert!(matches!(err, ConfigError::Parse { .. }));
+        assert!(err.is_usage());
         let chain = format!("{:#}", anyhow::Error::from(err));
         assert!(chain.starts_with("parse config "), "{chain}");
         assert!(chain.contains("unknown field `envs`"), "{chain}");
