@@ -2,15 +2,16 @@
 //! asserting on the exit code and the captured output.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::CommandFactory;
-use ss::{Cli, Exit, Io, Services, Sink};
+use ss::{Cli, Exit, Io, Services, Sink, Source};
 use ss_core::guard::Class;
 use ss_core::ops::{Input, Meta, OpResult, Operation, Param, Runner, View};
 
@@ -599,6 +600,16 @@ fn touch_services(root: &Path) -> (Services, Arc<AtomicUsize>) {
     (services, runs)
 }
 
+/// A stdin that blocks until its sender is dropped, then reads as empty.
+struct Gate(mpsc::Receiver<()>);
+
+impl Read for Gate {
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        let _ = self.0.recv();
+        Ok(0)
+    }
+}
+
 #[tokio::test]
 async fn bad_op_param_value_is_usage() {
     let (root, a, b) = diff_fixtures();
@@ -637,6 +648,75 @@ async fn unreadable_config_exits_1() {
     assert!(err.starts_with("ss ops list: read config "), "{err}");
     assert_eq!(err.lines().count(), 1, "{err}");
     assert_eq!(out, "");
+}
+
+#[tokio::test]
+async fn save_preset_without_params_is_usage_before_running() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (services, runs) = touch_services(root.path());
+    let (exit, out, err) = ss_with(
+        services,
+        &[
+            "ss",
+            "run",
+            "test.touch",
+            "--env",
+            "dev",
+            "--yes",
+            "--save-preset",
+            "p",
+        ],
+    )
+    .await;
+    assert_eq!(exit, Exit::Usage);
+    assert_eq!(err, "ss run test.touch: refusing to save an empty preset\n");
+    assert_eq!(out, "");
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    assert!(!root.path().join(".local/state/ss/audit.log").exists());
+    assert!(!root.path().join(".config/ss/presets.yaml").exists());
+}
+
+#[tokio::test]
+async fn eof_at_the_prompt_ends_the_prompt_line() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (services, _) = touch_services(root.path());
+    let (exit, out, err) = ss_with(services, &["ss", "run", "test.touch", "--env", "dev"]).await;
+    assert_eq!(exit, Exit::Failed);
+    assert_eq!(
+        err,
+        "Proceed with test.touch? [y/N] \nss run test.touch: operation not confirmed\n"
+    );
+    assert_eq!(out, "");
+}
+
+#[tokio::test]
+async fn interrupt_at_the_prompt_ends_the_prompt_line() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (services, runs) = touch_services(root.path());
+    let cli = parse(&services, &["ss", "run", "test.touch", "--env", "dev"]);
+    let (release, gate) = mpsc::channel();
+    let (io, captured) = Io::capture("");
+    let io = Io {
+        stdin: Source::new(BufReader::new(Gate(gate))),
+        ..io
+    };
+    let exit = ss::run_with_interrupt(
+        cli,
+        services,
+        io,
+        tokio::time::sleep(Duration::from_millis(100)),
+    )
+    .await;
+    drop(release);
+    assert_eq!(exit, Exit::Interrupted);
+    assert_eq!(
+        captured.stderr(),
+        "Proceed with test.touch? [y/N] \nss run test.touch: touch: cancelled\n"
+    );
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    let audit = fs::read_to_string(root.path().join(".local/state/ss/audit.log"))
+        .expect("interrupted run is audited");
+    assert!(audit.contains("\"outcome\":\"error\""), "{audit}");
 }
 
 #[tokio::test]

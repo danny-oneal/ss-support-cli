@@ -7,6 +7,8 @@ use clap::{Arg, ArgMatches, Command};
 use ss_core::ops::{Input, Operation, Param, ParamType};
 
 /// The `run` subcommand for `op`: one `--<param>` flag per declared param.
+/// A value may start with a hyphen (`--repeat -1`), and a flag given more
+/// than once takes its last value.
 ///
 /// Defaults and required checks are deliberately not enforced by clap; the
 /// runner applies both after merging any preset, so `--preset` alone is a
@@ -18,7 +20,8 @@ pub fn op_command(op: &dyn Operation) -> Command {
         .long_about(format!(
             "{} ({}, class: {})\n\n{}",
             meta.name, meta.category, meta.class, meta.summary
-        ));
+        ))
+        .args_override_self(true);
     for param in op.params() {
         cmd = cmd.arg(param_arg(&param));
     }
@@ -36,7 +39,7 @@ fn param_arg(param: &Param) -> Arg {
             .default_missing_value("true")
             .value_parser(BoolishValueParser::new())
     } else {
-        arg
+        arg.allow_hyphen_values(true)
     }
 }
 

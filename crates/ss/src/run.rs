@@ -30,7 +30,7 @@ pub enum Exit {
     /// Usage or config error: bad flag value, unknown operation or format,
     /// unparsable config/presets file.
     Usage = 2,
-    /// Interrupted by Ctrl-C (128 + SIGINT).
+    /// Interrupted by Ctrl-C, SIGTERM, or SIGHUP (128 + SIGINT).
     Interrupted = 130,
 }
 
@@ -47,7 +47,7 @@ pub(crate) enum Failure {
     Usage(anyhow::Error),
     /// The command ran and failed.
     Failed(anyhow::Error),
-    /// The command was stopped by Ctrl-C.
+    /// The command was stopped by an interrupt.
     Interrupted(anyhow::Error),
 }
 
@@ -98,7 +98,7 @@ pub(crate) struct App {
     pub presets: preset::Store,
     /// Who is running the command, for the audit trail.
     pub user: String,
-    /// Cancelled on the first Ctrl-C.
+    /// Cancelled on the first interrupt.
     pub cancel: CancellationToken,
 }
 
@@ -137,10 +137,21 @@ impl App {
     }
 }
 
-/// Runs the CLI on the process's standard streams. The first Ctrl-C cancels
-/// the command; a second one exits at once with [`Exit::Interrupted`].
+/// Runs the CLI on the process's standard streams. The first Ctrl-C,
+/// SIGTERM, or SIGHUP cancels the command; a second one of any kind exits at
+/// once with [`Exit::Interrupted`].
 pub async fn run(cli: Cli, services: Services) -> Exit {
-    run_with_interrupt(cli, services, Io::std(), ctrl_c()).await
+    // Installed before anything runs, so no signal takes its default action
+    // once the command has started.
+    let mut signals = Signals::install();
+    let interrupt = async move {
+        signals.next().await;
+        tokio::spawn(async move {
+            signals.next().await;
+            std::process::exit(Exit::Interrupted.code());
+        });
+    };
+    run_with_interrupt(cli, services, Io::std(), interrupt).await
 }
 
 /// Runs the CLI on `io`, never interrupted, so tests can drive the whole
@@ -186,15 +197,59 @@ async fn pipeline(
     cmd::dispatch(cli, &services.registry, &app, io).await
 }
 
-/// Resolves on the first Ctrl-C; a second one exits the process at once.
-async fn ctrl_c() {
-    if tokio::signal::ctrl_c().await.is_err() {
-        // No handler could be installed, so there is nothing to wait for.
-        std::future::pending::<()>().await;
+/// The signals that interrupt a command: SIGINT, SIGTERM, and SIGHUP.
+#[cfg(unix)]
+struct Signals(Vec<tokio::signal::unix::Signal>);
+
+#[cfg(unix)]
+impl Signals {
+    fn install() -> Self {
+        use tokio::signal::unix::{SignalKind, signal};
+        // A signal whose handler cannot be installed keeps its default action.
+        Self(
+            [
+                SignalKind::interrupt(),
+                SignalKind::terminate(),
+                SignalKind::hangup(),
+            ]
+            .into_iter()
+            .filter_map(|kind| signal(kind).ok())
+            .collect(),
+        )
     }
-    tokio::spawn(async {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            std::process::exit(Exit::Interrupted.code());
+
+    /// Resolves when any of the signals arrives.
+    async fn next(&mut self) {
+        std::future::poll_fn(|cx| {
+            let arrived = self
+                .0
+                .iter_mut()
+                .any(|s| s.poll_recv(cx) == std::task::Poll::Ready(Some(())));
+            if arrived {
+                std::task::Poll::Ready(())
+            } else {
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+    }
+}
+
+/// The signal that interrupts a command: Ctrl-C.
+#[cfg(not(unix))]
+struct Signals;
+
+#[cfg(not(unix))]
+impl Signals {
+    fn install() -> Self {
+        Self
+    }
+
+    /// Resolves on the next Ctrl-C.
+    async fn next(&mut self) {
+        if tokio::signal::ctrl_c().await.is_err() {
+            // No handler could be installed, so there is nothing to wait for.
+            std::future::pending::<()>().await;
         }
-    });
+    }
 }

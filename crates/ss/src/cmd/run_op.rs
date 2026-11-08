@@ -11,7 +11,7 @@ use chrono::Utc;
 use ss_core::ops::{
     FailureKind, Input, Progress, Registry, RunFailure, Runner, StepStatus, with_defaults,
 };
-use ss_core::preset::Store;
+use ss_core::preset::{self, Store};
 use ss_core::{jsonutil, render, report};
 
 use super::{note, print};
@@ -42,6 +42,10 @@ pub(super) async fn run(
     })?;
     let meta = op.meta();
     let input = resolve_input(non_empty(&cmd.preset), call, &app.presets)?;
+    // A preset that could not be saved is refused before anything runs.
+    if let Some(name) = non_empty(&cmd.save_preset) {
+        preset::validate(meta.id, name, input.as_map())?;
+    }
 
     let mut runner = Runner::new(app.deps.clone())
         .guard(Arc::clone(&app.guard))

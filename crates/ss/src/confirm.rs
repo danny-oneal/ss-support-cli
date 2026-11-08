@@ -13,7 +13,9 @@ use crate::io::{Sink, Source};
 
 /// Shows the preview on stderr and reads the answer from stdin: `y`/`yes`
 /// for a mutating operation, the exact resource name for a destructive one.
-/// End of input declines.
+/// End of input declines. Unless the operator ends the prompt line by
+/// answering, it is ended on their behalf, so whatever is printed next
+/// starts on its own line.
 pub(crate) struct StdinConfirmer {
     /// Supplies the operator's answer.
     pub stdin: Source,
@@ -45,6 +47,10 @@ impl Confirmer for StdinConfirmer {
             .write_all(prompt.as_bytes())
             .and_then(|()| stderr.flush())
             .context("write confirmation prompt")?;
+        let mut prompt_line = PromptLine {
+            stderr,
+            ended: false,
+        };
 
         // The read blocks, so it runs off the async workers: a Ctrl-C while
         // the operator is deciding can then stop the run at once.
@@ -56,12 +62,33 @@ impl Confirmer for StdinConfirmer {
         let Some(line) = line else {
             return Ok(false);
         };
+        prompt_line.ended = true;
         let answer = line.trim();
         Ok(if destructive {
             answer == spec.resource
         } else {
             matches!(answer.to_lowercase().as_str(), "y" | "yes")
         })
+    }
+}
+
+/// An open prompt line on stderr. Dropped before the operator ends it with
+/// Enter (end of input, a read error, or the prompt abandoned because the
+/// run was cancelled), it ends the line itself.
+struct PromptLine {
+    stderr: Sink,
+    ended: bool,
+}
+
+impl Drop for PromptLine {
+    fn drop(&mut self) {
+        if !self.ended {
+            // Nowhere is left to report a failure to end the line.
+            let _ = self
+                .stderr
+                .write_all(b"\n")
+                .and_then(|()| self.stderr.flush());
+        }
     }
 }
 
@@ -107,6 +134,41 @@ mod tests {
             let (ok, _) = answer(input, spec(Class::Mutate, Vec::new())).await;
             assert!(!ok, "{input:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn end_of_input_declines_and_ends_the_prompt_line() {
+        let (ok, captured) = answer("", spec(Class::Mutate, Vec::new())).await;
+        assert!(!ok);
+        assert_eq!(captured.stderr(), "Proceed with test.write? [y/N] \n");
+    }
+
+    /// A stdin that blocks until its sender is dropped, then reads as empty.
+    struct Gate(std::sync::mpsc::Receiver<()>);
+
+    impl std::io::Read for Gate {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            let _ = self.0.recv();
+            Ok(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn abandoned_prompt_ends_the_prompt_line() {
+        let (release, gate) = std::sync::mpsc::channel();
+        let (io, captured) = Io::capture("");
+        let confirmer = StdinConfirmer {
+            stdin: crate::io::Source::new(std::io::BufReader::new(Gate(gate))),
+            stderr: io.stderr,
+        };
+        let abandoned = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            confirmer.confirm(spec(Class::Mutate, Vec::new())),
+        )
+        .await;
+        drop(release);
+        assert!(abandoned.is_err(), "the read is still waiting");
+        assert_eq!(captured.stderr(), "Proceed with test.write? [y/N] \n");
     }
 
     #[tokio::test]

@@ -68,6 +68,22 @@ impl PresetError {
     }
 }
 
+/// Checks that `params` could be saved as preset `name` of `op`: both
+/// names are non-empty and at least one value is.
+pub fn validate(
+    op: &str,
+    name: &str,
+    params: &BTreeMap<String, String>,
+) -> Result<(), PresetError> {
+    if op.is_empty() || name.is_empty() {
+        return Err(PresetError::MissingName);
+    }
+    if params.values().all(String::is_empty) {
+        return Err(PresetError::Empty);
+    }
+    Ok(())
+}
+
 /// The presets file location: `SS_PRESETS`, else
 /// `$XDG_CONFIG_HOME/ss/presets.yaml`, else `~/.config/ss/presets.yaml`.
 pub fn default_path(v: &Vars) -> PathBuf {
@@ -156,17 +172,12 @@ impl Store {
         name: &str,
         params: &BTreeMap<String, String>,
     ) -> Result<(), PresetError> {
-        if op.is_empty() || name.is_empty() {
-            return Err(PresetError::MissingName);
-        }
+        validate(op, name, params)?;
         let clean: BTreeMap<String, String> = params
             .iter()
             .filter(|(_, v)| !v.is_empty())
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        if clean.is_empty() {
-            return Err(PresetError::Empty);
-        }
         let mut f = self.load()?;
         f.presets
             .entry(op.to_owned())
@@ -388,6 +399,29 @@ mod tests {
             s.get("demo.hello", "world").expect("get"),
             Some(params(&[("name", "world")]))
         );
+    }
+
+    #[test]
+    fn validate_matches_what_save_refuses() {
+        let ok = params(&[("a", "1"), ("b", "")]);
+        assert!(validate("op", "n", &ok).is_ok());
+        assert!(matches!(
+            validate("op", "", &ok),
+            Err(PresetError::MissingName)
+        ));
+        assert!(matches!(
+            validate("", "n", &ok),
+            Err(PresetError::MissingName)
+        ));
+        let empty = params(&[("a", "")]);
+        assert!(matches!(
+            validate("op", "n", &empty),
+            Err(PresetError::Empty)
+        ));
+        assert!(matches!(
+            validate("op", "n", &BTreeMap::new()),
+            Err(PresetError::Empty)
+        ));
     }
 
     #[test]

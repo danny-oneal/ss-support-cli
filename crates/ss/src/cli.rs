@@ -286,6 +286,23 @@ mod tests {
     }
 
     #[test]
+    fn op_params_take_hyphen_leading_values() {
+        let cli =
+            parse(&["ss", "run", "demo.hello", "--repeat", "-1", "--name", "-x"]).expect("parses");
+        assert_eq!(call(&cli).input.str("repeat"), "-1");
+        assert_eq!(call(&cli).input.str("name"), "-x");
+    }
+
+    #[test]
+    fn repeated_op_params_take_the_last_value() {
+        let cli =
+            parse(&["ss", "run", "demo.hello", "--name", "a", "--name", "b"]).expect("parses");
+        assert_eq!(call(&cli).input.str("name"), "b");
+        let cli = parse(&["ss", "run", "demo.hello", "--shout", "--shout=false"]).expect("parses");
+        assert_eq!(call(&cli).input.str("shout"), "false");
+    }
+
+    #[test]
     fn globals_parse_after_the_op_id() {
         let cli = parse(&[
             "ss",
