@@ -1,0 +1,30 @@
+[package]
+name = "ss"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Support operations CLI (Rust port) — diagnose and remediate non-production resources"
+
+[lib]
+name = "ss"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ss"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+globset = "0.4"
+thiserror = "2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 3
