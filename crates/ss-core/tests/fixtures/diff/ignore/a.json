@@ -1,0 +1,5 @@
+{
+  "metadata": { "revision": 1, "name": "x" },
+  "updatedAt": "2026-01-01T00:00:00Z",
+  "nested": { "updatedAt": "2026-01-01T00:00:00Z", "value": 1 }
+}

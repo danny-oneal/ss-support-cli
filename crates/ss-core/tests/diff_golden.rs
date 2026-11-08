@@ -1,4 +1,4 @@
-//! Golden tests over the fixture corpus at `internal/diff/testdata`: each
+//! Golden tests over the fixture corpus at `tests/fixtures/diff`: each
 //! case directory holds `a.json`, `b.json`, and the `expected.txt` rendering
 //! of their diff under the options in [`golden_opts`].
 
@@ -10,7 +10,7 @@ use ss_core::diff::{self, Delta, Kind, Opts};
 use ss_core::jsonutil;
 
 fn fixtures_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../internal/diff/testdata")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/diff")
 }
 
 fn golden_opts() -> Vec<(&'static str, Opts)> {

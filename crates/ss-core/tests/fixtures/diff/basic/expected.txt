@@ -1,0 +1,4 @@
+- limits.burst = 200
++ owner = "support"
+~ tier: "gold" -> "platinum"
+stats: +1 −1 ~1

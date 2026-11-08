@@ -1,0 +1,7 @@
+{
+  "name": "acme",
+  "tier": "platinum",
+  "limits": { "rps": 100 },
+  "owner": "support",
+  "tags": ["a", "b"]
+}
