@@ -622,9 +622,13 @@ name = "ss"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
+ "serde_json",
  "ss-core",
+ "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

@@ -229,11 +229,12 @@ where
         run.call = matches
             .subcommand_matches("run")
             .and_then(ArgMatches::subcommand)
-            .and_then(|(id, op_matches)| {
-                registry.get(id).map(|op| OpCall {
+            .map(|(id, op_matches)| {
+                let op = registry.get(id).expect("matched subcommand is registered");
+                OpCall {
                     id: id.to_owned(),
                     input: dynamic::collect_input(op.as_ref(), op_matches),
-                })
+                }
             });
     }
     Ok(cli)
