@@ -1,7 +1,6 @@
-//! Cross-implementation golden test: the Go fixtures under
-//! `internal/diff/testdata/<case>/{a,b}.json` + `expected.txt` are run through
-//! the Rust engine unchanged. The option table mirrors `goldenOpts` in
-//! `internal/diff/json_test.go`; the renderer mirrors its `renderDelta`.
+//! Golden tests over the fixture corpus at `internal/diff/testdata`: each
+//! case directory holds `a.json`, `b.json`, and the `expected.txt` rendering
+//! of their diff under the options in [`golden_opts`].
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -50,7 +49,7 @@ fn golden_opts() -> Vec<(&'static str, Opts)> {
     ]
 }
 
-/// The stable text form Go's goldens are written in (`renderDelta`).
+/// The stable text form the goldens are written in.
 fn render_delta(d: &Delta) -> String {
     let mut out = String::new();
     for c in &d.changes {
@@ -70,8 +69,8 @@ fn render_delta(d: &Delta) -> String {
     out
 }
 
-/// Go's `golden.normalize`: CRLF → LF, trailing whitespace stripped, exactly
-/// one trailing newline, empty stays empty.
+/// CRLF → LF, trailing whitespace stripped, exactly one trailing newline,
+/// empty stays empty.
 fn normalize(s: &str) -> String {
     let lf = s.replace("\r\n", "\n");
     let body = lf
@@ -88,7 +87,7 @@ fn normalize(s: &str) -> String {
 }
 
 #[test]
-fn go_fixtures_pass_unchanged() {
+fn fixtures_render_as_expected() {
     let dir = fixtures_dir();
     assert!(dir.is_dir(), "fixtures not found at {}", dir.display());
     let mut seen = 0;
@@ -101,7 +100,7 @@ fn go_fixtures_pass_unchanged() {
         assert_eq!(got, want, "fixture {name}");
         seen += 1;
     }
-    // Every fixture directory on disk must be in the table, so a new Go case
+    // Every fixture directory on disk must be in the table, so a new case
     // cannot be silently skipped.
     let on_disk = fs::read_dir(&dir)
         .unwrap()

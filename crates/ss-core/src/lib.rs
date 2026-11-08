@@ -1,7 +1,5 @@
-//! `ss` — support operations CLI (Rust port).
-//!
-//! This crate is being ported from the Go implementation. The spine is built
-//! first: the semantic JSON [`diff`] engine, then the operations layer.
+//! Core library for the `ss` support operations CLI: the semantic JSON
+//! [`diff`] engine and the [`jsonutil`] helpers it is built on.
 
 pub mod diff;
 pub mod jsonutil;

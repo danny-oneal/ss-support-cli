@@ -173,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn match_table_mirrors_go() {
+    fn match_table() {
         let cases: Vec<(&str, Vec<Segment>, bool)> = vec![
             ("**.updatedAt", vec![k("updatedAt")], true),
             ("**.updatedAt", vec![k("nested"), k("updatedAt")], true),

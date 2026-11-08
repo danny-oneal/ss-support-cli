@@ -1,9 +1,8 @@
-//! Tolerant JSON parsing, Go-compatible canonical rendering, and redaction.
+//! Tolerant JSON parsing, canonical rendering, and redaction.
 //!
-//! The Go implementation parses every number as `float64` and renders through
-//! `encoding/json`, so `1` and `1.0` are the same value and print as `1`.
-//! [`parse`] and the renderers here reproduce that: equality, LCS hashing, and
-//! keyed-array identity all depend on it.
+//! Every number is treated as an `f64`: `1` and `1.0` are the same value and
+//! print as `1`. Equality, LCS hashing, and keyed-array identity all depend on
+//! [`parse`] and the renderers agreeing on that.
 
 use std::fmt::Write as _;
 
@@ -21,7 +20,7 @@ pub enum JsonError {
 }
 
 /// Parses JSON tolerantly: strips a UTF-8 BOM and surrounding whitespace, and
-/// normalizes every number to the `f64` semantics Go uses (see [`normalize`]).
+/// normalizes every number to `f64` semantics (see [`normalize`]).
 ///
 /// # Errors
 /// [`JsonError::Empty`] for a blank document, [`JsonError::Parse`] otherwise.
@@ -48,9 +47,9 @@ fn trim_ascii(b: &[u8]) -> &[u8] {
     &b[start..end]
 }
 
-/// Rewrites every number in place so that values Go would consider equal
-/// compare equal here: each number goes through `f64`, and an integral value
-/// that fits exactly is stored as an integer (`1.0` → `1`).
+/// Rewrites every number in place so that numerically equal values compare
+/// equal: each number goes through `f64`, and an integral value that fits
+/// exactly is stored as an integer (`1.0` → `1`).
 pub fn normalize(v: &mut Value) {
     match v {
         Value::Number(n) => {
@@ -64,7 +63,7 @@ pub fn normalize(v: &mut Value) {
     }
 }
 
-/// The `Number` Go's `float64` round-trips to: an `i64` when the value is
+/// The `Number` an `f64` round-trips to: an `i64` when the value is
 /// integral and exactly representable, else the float itself.
 fn go_number(f: f64) -> Number {
     const EXACT: f64 = 9_007_199_254_740_992.0; // 2^53
@@ -76,8 +75,8 @@ fn go_number(f: f64) -> Number {
     }
 }
 
-/// Formats a number the way Go's `encoding/json` does: shortest round-trip
-/// digits, plain notation for `1e-6 <= |x| < 1e21`, otherwise exponent form
+/// Formats a number with the shortest round-trip digits: plain notation for
+/// `1e-6 <= |x| < 1e21`, otherwise exponent form
 /// with an explicit sign; positive exponents are zero-padded to two digits
 /// (`1e+21`) and negative ones are not (`1e-7`).
 pub fn fmt_number(n: &Number) -> String {
@@ -92,9 +91,8 @@ pub fn fmt_number(n: &Number) -> String {
     if abs != 0.0 && !(1e-6..1e21).contains(&abs) {
         let s = format!("{f:e}");
         let (mantissa, exp) = s.split_once('e').unwrap_or((&s, "0"));
-        // encoding/json keeps strconv's two-digit positive exponents (`e+21`)
-        // but strips the leading zero from small negative ones (`e-7`, not
-        // `e-07`).
+        // Positive exponents are zero-padded to two digits (`e+21`); negative
+        // ones are not (`e-7`).
         return match exp.strip_prefix('-') {
             Some(d) => format!("{mantissa}e-{d}"),
             None => format!("{mantissa}e+{exp:0>2}"),
@@ -103,8 +101,8 @@ pub fn fmt_number(n: &Number) -> String {
     format!("{f}")
 }
 
-/// Deterministic one-line serialization with sorted keys and Go-style
-/// numbers; the hash for array elements and identity values.
+/// Deterministic one-line serialization with sorted keys; the hash for array
+/// elements and identity values.
 pub fn canonical(v: &Value) -> String {
     let mut out = String::new();
     write_value(&mut out, v, None, 0);
@@ -212,8 +210,8 @@ pub fn redacted(v: &Value, fields: &[&str]) -> Value {
     redact(v, &fields)
 }
 
-/// The JSON type name Go's diff engine uses: `null`, `bool`, `number`,
-/// `string`, `object`, or `array`.
+/// The JSON type name: `null`, `bool`, `number`, `string`, `object`, or
+/// `array`.
 pub fn json_type(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
@@ -253,14 +251,13 @@ mod tests {
     }
 
     #[test]
-    fn canonical_formats_numbers_like_go_encoding_json() {
+    fn canonical_formats_numbers_with_shortest_digits() {
         assert_eq!(canonical(&json!(1.0)), "1");
         assert_eq!(canonical(&json!(100)), "100");
         assert_eq!(canonical(&json!(0.123456)), "0.123456");
         assert_eq!(canonical(&json!(-0.0)), "-0");
         assert_eq!(canonical(&json!(0.000001)), "0.000001");
-        // encoding/json strips the zero-pad strconv adds to small negative
-        // exponents: 1e-07 → 1e-7. Positive exponents keep two digits.
+        // Negative exponents are unpadded; positive ones keep two digits.
         assert_eq!(canonical(&json!(1e-7)), "1e-7");
         assert_eq!(canonical(&json!(2.5e-8)), "2.5e-8");
         assert_eq!(canonical(&json!(-1e-7)), "-1e-7");
@@ -306,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn json_type_names_match_go() {
+    fn json_type_names() {
         assert_eq!(json_type(&json!(null)), "null");
         assert_eq!(json_type(&json!(true)), "bool");
         assert_eq!(json_type(&json!(1)), "number");

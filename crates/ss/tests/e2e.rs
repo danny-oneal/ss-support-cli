@@ -5,7 +5,7 @@ use clap::{CommandFactory, Parser};
 use ss::{Cli, Exit};
 
 #[test]
-fn exit_codes_follow_the_house_scheme() {
+fn exit_codes_are_distinct_and_stable() {
     assert_eq!(Exit::Ok.code(), 0);
     assert_eq!(Exit::Failed.code(), 1);
     assert_eq!(Exit::Usage.code(), 2);

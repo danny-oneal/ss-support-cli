@@ -48,7 +48,7 @@ impl Segment {
     }
 }
 
-/// A value rendered the way Go's `%v` shows an identity value: strings bare,
+/// An identity value as it appears inside a path segment: strings bare,
 /// everything else as compact JSON.
 fn plain(v: &Value) -> String {
     match v {

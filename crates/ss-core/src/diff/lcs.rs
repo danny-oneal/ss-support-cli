@@ -2,8 +2,7 @@
 
 /// Matched index pairs `(ai, bi)` of a classic LCS dynamic program, in
 /// increasing order. Ties break toward advancing the left side
-/// (`dp[i+1][j] >= dp[i][j+1]`), exactly as the Go implementation does, so
-/// the two engines align the same gaps.
+/// (`dp[i+1][j] >= dp[i][j+1]`).
 pub fn pairs(a: &[String], b: &[String]) -> Vec<(usize, usize)> {
     let (n, m) = (a.len(), b.len());
     if n == 0 || m == 0 {
@@ -64,8 +63,8 @@ mod tests {
     }
 
     #[test]
-    fn pairs_prefers_advancing_the_left_side_on_ties_like_go() {
-        // a=[x,y], b=[y,x]: LCS length 1 either way; Go's dp[i+1][j] >= dp[i][j+1]
+    fn pairs_prefers_advancing_the_left_side_on_ties() {
+        // a=[x,y], b=[y,x]: LCS length 1 either way; the dp[i+1][j] >= dp[i][j+1]
         // tie-break skips a[0] first and matches "y".
         assert_eq!(pairs(&s(&["x", "y"]), &s(&["y", "x"])), vec![(1, 0)]);
     }

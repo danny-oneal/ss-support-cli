@@ -66,11 +66,11 @@ pub struct Change {
 }
 
 /// Renders both dotted and JSONPath forms so `-o json` output is directly
-/// consumable; absent and null sides are omitted, as Go's `omitempty` does.
+/// consumable; absent and null sides are omitted.
 impl Serialize for Change {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        // Go's `omitempty` on an `any` drops a nil interface, and a decoded
-        // JSON null *is* nil, so an explicit null side is omitted too.
+        // A null side carries no more information than a missing one, so
+        // both are omitted.
         let (old, new) = (non_null(&self.old), non_null(&self.new));
         let n = 3 + usize::from(old.is_some()) + usize::from(new.is_some());
         let mut st = ser.serialize_struct("Change", n)?;
@@ -87,7 +87,7 @@ impl Serialize for Change {
     }
 }
 
-/// A side of a change that Go's `omitempty` would keep: present and not null.
+/// A side of a change worth serializing: present and not null.
 fn non_null(v: &Option<Value>) -> Option<&Value> {
     v.as_ref().filter(|v| !v.is_null())
 }
@@ -121,8 +121,8 @@ pub fn json(left: &Value, right: &Value, opts: &Opts) -> Delta {
         changes: Vec::new(),
     };
     w.walk(&Path::default(), left, right);
-    // Go sorts by the dotted path string (stable), so output order is
-    // independent of map iteration and matching strategy.
+    // Stable sort by the dotted path string, so output order is independent
+    // of map iteration and matching strategy.
     let mut changes = w.changes;
     changes.sort_by_cached_key(|c| c.path.dotted());
     let mut delta = Delta::default();
@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn integer_and_integral_float_are_equal() {
-        // Go parses every number as float64; `1` and `1.0` are one value.
+        // Numbers compare numerically: `1` and `1.0` are one value.
         let delta = json(&json!({"a": 1}), &json!({"a": 1.0}), &Opts::default());
         assert!(delta.changes.is_empty(), "{:?}", delta.changes);
     }
@@ -492,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::approx_constant)] // values copied from Go's tolerance fixture
+    #[allow(clippy::approx_constant)] // arbitrary fixture values, not the constants
     fn tolerance_absorbs_small_float_differences_only() {
         let opts = Opts {
             tolerance: 0.001,
@@ -715,8 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn change_omits_sides_that_are_json_null_like_go_omitempty() {
-        // Go's `any` nil covers a decoded JSON null, so `omitempty` drops it.
+    fn change_omits_sides_that_are_json_null() {
         let delta = json(
             &json!({"count": 5, "flag": null}),
             &json!({"count": null, "flag": true, "n": null}),

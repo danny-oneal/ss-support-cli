@@ -38,7 +38,6 @@ mod tests {
 
     #[test]
     fn renders_unified_style_prefixes_without_hunk_headers() {
-        // Captured from the Go implementation.
         assert_eq!(text("a\nb\nc", "a\nc\nd"), " a\n-b\n c\n+d\n");
     }
 

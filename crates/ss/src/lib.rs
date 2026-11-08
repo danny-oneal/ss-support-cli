@@ -1,4 +1,4 @@
-//! `ss` — support operations CLI (Rust port of the Go `ss`).
+//! `ss` — support operations CLI.
 //!
 //! `main.rs` is a shim: it parses [`Cli`] and turns the [`Exit`] returned by
 //! [`run`] into the process exit code. Everything testable lives here so the
@@ -8,7 +8,7 @@ use std::io::Write;
 
 use clap::Parser;
 
-/// Process exit status (redliner scheme; see master plan §2a).
+/// Process exit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exit {
     /// The operation completed (a successful `--dry-run` included).
@@ -29,8 +29,8 @@ impl Exit {
     }
 }
 
-/// Command-line surface. Subcommands arrive in Phase 2; with none given the
-/// Go binary opens the TUI, and this placeholder exits `Ok`.
+/// Command-line surface. With no subcommand the interactive TUI is the
+/// default; until it exists, a bare invocation exits `Ok`.
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "ss",

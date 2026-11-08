@@ -62,7 +62,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn display_omits_zero_counts_and_uses_go_glyphs() {
+    fn display_omits_zero_counts() {
         let s = Stats {
             added: 2,
             removed: 1,

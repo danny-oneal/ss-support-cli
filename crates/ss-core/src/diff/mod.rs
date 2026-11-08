@@ -1,8 +1,8 @@
 //! Semantic JSON diff engine.
 //!
 //! Compares two parsed JSON trees and produces a [`Delta`] of typed
-//! [`Change`]s. Ported from the Go `internal/diff` package: functional
-//! parity, with the Go golden fixtures shared directly.
+//! [`Change`]s: objects by key-set union, arrays by identity key or longest
+//! common subsequence, scalars by typed compare.
 
 pub mod glob;
 pub mod json;

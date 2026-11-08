@@ -2,8 +2,7 @@
 resolver = "3"
 members = ["crates/ss-core", "crates/ss"]
 
-# One version for both crates, released together (see docs/superpowers/plans/
-# 2026-11-07-rust-port-master-plan.md §2a). scripts/release.sh bumps it.
+# One version for both crates, released together.
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
