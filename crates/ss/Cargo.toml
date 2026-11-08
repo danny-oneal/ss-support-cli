@@ -1,0 +1,21 @@
+[package]
+name = "ss"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Support operations CLI for non-production AWS and Kubernetes (Rust port)"
+
+[[bin]]
+name = "ss"
+path = "src/main.rs"
+
+[dependencies]
+ss-core = { path = "../ss-core", version = "=0.1.0" }
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

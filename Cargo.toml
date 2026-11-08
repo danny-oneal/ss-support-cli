@@ -1,0 +1,53 @@
+[workspace]
+resolver = "3"
+members = ["crates/ss-core", "crates/ss"]
+
+# One version for both crates, released together (see docs/superpowers/plans/
+# 2026-11-07-rust-port-master-plan.md §2a). scripts/release.sh bumps it.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/danny-oneal/ss-support-cli"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+globset = "0.4"
+serde = { version = "1", features = ["derive"] }
+# No `preserve_order`: sorted keys are what makes jsonutil::canonical canonical.
+serde_json = "1"
+serde_yaml_ng = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "process", "io-util", "signal", "time", "fs"] }
+tracing = "0.1"
+# dev
+insta = "1"
+tempfile = "3"
+
+[workspace.lints.rust]
+unexpected_cfgs = "warn"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+
+# A support tool's startup time is part of every invocation; release builds
+# trade compile time for a smaller, faster static binary.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Optimize dependencies even in dev so the TDD loop is not dominated by
+# debug-mode serde/tokio.
+[profile.dev.package."*"]
+opt-level = 3

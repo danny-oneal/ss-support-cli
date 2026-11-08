@@ -28,7 +28,12 @@ pub enum Segment {
     /// An array element accessed by position.
     Index(usize),
     /// An array element matched by an identity field rather than position.
-    MatchKey { field: String, value: String },
+    MatchKey {
+        /// The identity field named by the array-match rule.
+        field: String,
+        /// That field's value on the matched element, as text.
+        value: String,
+    },
 }
 
 /// A typed path from the document root to a changed value.
