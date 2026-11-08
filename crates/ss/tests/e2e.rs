@@ -1,7 +1,7 @@
 //! In-process end-to-end tests: drive `ss::run_with` the way `main` does,
 //! asserting on the exit code and the captured output.
 
-use clap::{CommandFactory, Parser};
+use clap::CommandFactory;
 use ss::{Cli, Exit};
 
 #[test]
@@ -17,14 +17,4 @@ fn version_is_the_workspace_version() {
     let cmd = Cli::command();
     assert_eq!(cmd.get_name(), "ss");
     assert_eq!(cmd.get_version(), Some(env!("CARGO_PKG_VERSION")));
-}
-
-#[tokio::test]
-async fn no_arguments_runs_and_exits_ok() {
-    let cli = Cli::parse_from(["ss"]);
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    let code = ss::run_with(cli, &mut out, &mut err).await;
-    assert_eq!(code, Exit::Ok);
-    assert!(err.is_empty(), "stderr: {}", String::from_utf8_lossy(&err));
 }

@@ -6,7 +6,11 @@
 
 use std::io::Write;
 
-use clap::Parser;
+mod cli;
+
+pub use cli::{
+    Cli, Command, GlobalFlags, OpCall, OpsCmd, Output, PresetsCmd, RunCmd, command, parse_from,
+};
 
 /// Process exit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,16 +32,6 @@ impl Exit {
         self as i32
     }
 }
-
-/// Command-line surface. With no subcommand the interactive TUI is the
-/// default; until it exists, a bare invocation exits `Ok`.
-#[derive(Parser, Debug, Clone)]
-#[command(
-    name = "ss",
-    version,
-    about = "Support operations for non-production AWS and Kubernetes"
-)]
-pub struct Cli {}
 
 /// Runs the CLI with the real stdout/stderr.
 pub async fn run(cli: Cli) -> Exit {
