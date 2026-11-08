@@ -7,8 +7,10 @@
 use serde::Serialize;
 use serde_json::Value;
 
+pub mod glob;
 pub mod path;
 
+pub use glob::{GlobError, PathGlob, compile_globs};
 pub use path::{Path, Segment};
 
 /// How a single value changed between the left and right documents.
