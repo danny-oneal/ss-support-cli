@@ -22,6 +22,8 @@ enum Act {
     StopDry,
     Decline,
     Mutate(&'static str),
+    CancelThenFail(&'static str, &'static str),
+    BadParam(&'static str, &'static str),
     Preview,
     Resource(&'static str),
 }
@@ -106,6 +108,21 @@ impl Operation for Script {
                         Ok(())
                     })
                     .await?
+                }
+                Act::CancelThenFail(name, msg) => {
+                    r.step(name, |token| async move {
+                        token.cancel();
+                        Err::<(), _>(anyhow::anyhow!(msg))
+                    })
+                    .await?
+                }
+                Act::BadParam(param, value) => {
+                    return Err(RunnerError::InvalidParam {
+                        param: param.to_owned(),
+                        value: value.to_owned(),
+                        source: "not a number".into(),
+                    }
+                    .into());
                 }
                 Act::Preview => r.preview([View::summary([("About to", "write things")])]),
                 Act::Resource(name) => r.set_resource(name),
@@ -239,7 +256,7 @@ async fn required_param_and_defaults() {
         .execute(&op, Input::default())
         .await
         .unwrap_err();
-    assert_eq!(f.kind, FailureKind::MissingParam);
+    assert_eq!(f.kind, FailureKind::Usage);
     assert_eq!(f.error.to_string(), r#"required param "bucket" missing"#);
     assert_eq!(op.runs.load(Ordering::SeqCst), 0);
 
@@ -683,4 +700,100 @@ async fn cancelled_before_confirmation_never_prompts() {
     assert_eq!(f.kind, FailureKind::Cancelled);
     assert!(confirmer.specs.lock().unwrap().is_empty());
     assert_eq!(op.mutated.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn invalid_param_is_a_usage_failure_and_is_audited() {
+    let op = script(Class::Mutate, vec![Act::BadParam("tolerance", "abc")]);
+    let audit = Arc::new(RecordingAudit::default());
+    let f = Runner::new(Deps::default())
+        .audit(audit.clone())
+        .execute(&op, Input::default())
+        .await
+        .unwrap_err();
+    assert_eq!(f.kind, FailureKind::Usage);
+    assert_eq!(
+        format!("{:#}", f.error),
+        r#"invalid tolerance "abc": not a number"#
+    );
+    let entries = audit.entries.lock().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].outcome, Outcome::Error);
+}
+
+#[tokio::test]
+async fn own_error_after_cancellation_is_still_cancelled() {
+    let op = script(
+        Class::Mutate,
+        vec![Act::CancelThenFail("slow", "connection reset")],
+    );
+    let audit = Arc::new(RecordingAudit::default());
+    let f = Runner::new(Deps::default())
+        .yes(true)
+        .audit(audit.clone())
+        .execute(&op, Input::default())
+        .await
+        .unwrap_err();
+    assert_eq!(f.kind, FailureKind::Cancelled);
+    assert_eq!(format!("{:#}", f.error), "slow: connection reset");
+    let entries = audit.entries.lock().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].outcome, Outcome::Error);
+}
+
+#[tokio::test]
+async fn read_only_op_cannot_mutate() {
+    for dry_run in [false, true] {
+        let op = script(Class::Read, vec![Act::Mutate("write")]);
+        let confirmer = RecordingConfirmer::new(Ok(true));
+        let f = Runner::new(Deps::default())
+            .yes(true)
+            .dry_run(dry_run)
+            .confirmer(confirmer.clone())
+            .execute(&op, Input::default())
+            .await
+            .unwrap_err();
+        assert_eq!(f.kind, FailureKind::Failed, "dry_run={dry_run}");
+        assert!(matches!(
+            find_cause::<RunnerError>(&f.error),
+            Some(RunnerError::ReadOnlyMutation)
+        ));
+        assert_eq!(
+            format!("{:#}", f.error),
+            "write: read-only operation attempted a mutating step"
+        );
+        assert_eq!(op.mutated.load(Ordering::SeqCst), 0);
+        assert!(confirmer.specs.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn failed_audit_write_is_reported_as_a_warning() {
+    let op = script(Class::Mutate, vec![Act::Step("change")]);
+    let warnings = Arc::new(Mutex::new(Vec::new()));
+    let sink = warnings.clone();
+    let result = Runner::new(Deps::default())
+        .yes(true)
+        .audit(Arc::new(FailingAudit))
+        .on_warning(move |w| sink.lock().unwrap().push(w))
+        .execute(&op, Input::default())
+        .await
+        .unwrap();
+    assert_eq!(result.views, [View::summary([("Done", "yes")])]);
+    assert_eq!(*warnings.lock().unwrap(), ["audit log: disk full"]);
+}
+
+#[tokio::test]
+async fn successful_audit_write_warns_nothing() {
+    let op = script(Class::Mutate, vec![Act::Step("change")]);
+    let warnings = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = warnings.clone();
+    Runner::new(Deps::default())
+        .yes(true)
+        .audit(Arc::new(RecordingAudit::default()))
+        .on_warning(move |w| sink.lock().unwrap().push(w))
+        .execute(&op, Input::default())
+        .await
+        .unwrap();
+    assert!(warnings.lock().unwrap().is_empty());
 }

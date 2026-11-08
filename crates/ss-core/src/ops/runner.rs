@@ -55,13 +55,28 @@ pub enum RunnerError {
         /// The parameter name.
         param: String,
     },
+    /// A parameter's value could not be used.
+    #[error("invalid {param} {value:?}")]
+    InvalidParam {
+        /// The parameter name.
+        param: String,
+        /// The value as given.
+        value: String,
+        /// Why the value was rejected.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// A read-only operation reached a mutating step.
+    #[error("read-only operation attempted a mutating step")]
+    ReadOnlyMutation,
 }
 
 /// How a failed run is classified.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FailureKind {
-    /// A required parameter was missing.
-    MissingParam,
+    /// The input was unusable: a required parameter was missing or a value
+    /// was invalid.
+    Usage,
     /// The guard refused the run.
     Denied,
     /// The operator declined at confirmation.
@@ -121,6 +136,7 @@ pub struct Runner {
     guard: Arc<dyn Guard>,
     audit: Arc<dyn Logger>,
     progress: Option<Arc<dyn Fn(Progress) + Send + Sync>>,
+    warning: Option<Arc<dyn Fn(String) + Send + Sync>>,
     dry_run: bool,
     yes: bool,
     user: String,
@@ -138,6 +154,7 @@ impl Runner {
             guard: Arc::new(AllowAll),
             audit: Arc::new(audit::Nop),
             progress: None,
+            warning: None,
             dry_run: false,
             yes: false,
             user: String::new(),
@@ -162,6 +179,13 @@ impl Runner {
     /// Sets the callback that receives step progress.
     pub fn progress(mut self, f: impl Fn(Progress) + Send + Sync + 'static) -> Self {
         self.progress = Some(Arc::new(f));
+        self
+    }
+
+    /// Sets the callback that receives problems that do not fail the run,
+    /// such as an audit entry that could not be written.
+    pub fn on_warning(mut self, f: impl Fn(String) + Send + Sync + 'static) -> Self {
+        self.warning = Some(Arc::new(f));
         self
     }
 
@@ -218,7 +242,7 @@ impl Runner {
             .find(|p| p.required && input.str(p.name).is_empty())
         {
             return Err(RunFailure {
-                kind: FailureKind::MissingParam,
+                kind: FailureKind::Usage,
                 error: RunnerError::MissingParam {
                     param: p.name.to_owned(),
                 }
@@ -276,6 +300,16 @@ impl Runner {
         };
         let runner_err = find_cause::<RunnerError>(&error);
 
+        // Once the run is cancelled, whatever the operation returned is a
+        // consequence of the cancellation, even if its own error won the race.
+        if self.token.is_cancelled() {
+            self.record(meta, input, Outcome::Error, start, Some(&error));
+            return Err(RunFailure {
+                kind: FailureKind::Cancelled,
+                error,
+                views: Vec::new(),
+            });
+        }
         if matches!(runner_err, Some(RunnerError::DryRun)) {
             self.record(meta, input, Outcome::DryRun, start, None);
             return Ok(OpResult {
@@ -290,10 +324,10 @@ impl Runner {
                 error,
             });
         }
-        let kind = if matches!(runner_err, Some(RunnerError::Cancelled)) {
-            FailureKind::Cancelled
-        } else {
-            FailureKind::Failed
+        let kind = match runner_err {
+            Some(RunnerError::Cancelled) => FailureKind::Cancelled,
+            Some(RunnerError::InvalidParam { .. }) => FailureKind::Usage,
+            _ => FailureKind::Failed,
         };
         self.record(meta, input, Outcome::Error, start, Some(&error));
         Err(RunFailure {
@@ -347,16 +381,22 @@ impl Runner {
         self.state.resource = s.into();
     }
 
-    /// [`Runner::step`] for state-changing work. A dry run stops here, before
-    /// anything changes. The first mutating step of a run collects the
-    /// operator's confirmation; `--yes` covers mutating operations but never
-    /// destructive ones, and a missing confirmer fails closed. Cancelling the
-    /// run while the operator is being asked stops it at once.
+    /// [`Runner::step`] for state-changing work. A read-only operation is
+    /// refused here without asking or running anything. A dry run stops
+    /// here, before anything changes. The first mutating step of a run
+    /// collects the operator's confirmation; `--yes` covers mutating
+    /// operations but never destructive ones, and a missing confirmer fails
+    /// closed. Cancelling the run while the operator is being asked stops it
+    /// at once.
     pub async fn mutate<F, Fut, T>(&mut self, name: &str, f: F) -> anyhow::Result<T>
     where
         F: FnOnce(CancellationToken) -> Fut,
         Fut: Future<Output = anyhow::Result<T>>,
     {
+        if self.state.meta.is_some_and(|m| m.class == Class::Read) {
+            self.emit(name, StepStatus::Skipped, Duration::ZERO, None);
+            return Err(anyhow::Error::new(RunnerError::ReadOnlyMutation).context(name.to_owned()));
+        }
         if self.dry_run {
             self.emit(name, StepStatus::Skipped, Duration::ZERO, None);
             return Err(RunnerError::DryRun.into());
@@ -430,7 +470,7 @@ impl Runner {
     }
 
     /// Writes the audit entry. Reads are not audited, and a failure to write
-    /// never changes the run's own outcome.
+    /// is reported as a warning but never changes the run's own outcome.
     fn record(
         &self,
         meta: &Meta,
@@ -453,6 +493,10 @@ impl Runner {
             duration_ms: i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX),
             error: error.map(|e| format!("{e:#}")),
         };
-        let _ = self.audit.record(&entry);
+        if let Err(e) = self.audit.record(&entry)
+            && let Some(warn) = &self.warning
+        {
+            warn(format!("audit log: {e:#}"));
+        }
     }
 }

@@ -4,10 +4,15 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use clap::CommandFactory;
 use ss::{Cli, Exit, Io, Services, Sink};
+use ss_core::guard::Class;
+use ss_core::ops::{Input, Meta, OpResult, Operation, Param, Runner, View};
 
 /// Runs `args` against an isolated home under `root` with empty stdin,
 /// returning the exit status and the captured stdout and stderr.
@@ -547,4 +552,95 @@ async fn ctrl_c_mid_run_exits_130() {
         "ss run demo.hello: compose greeting: cancelled\n"
     );
     assert_eq!(captured.stdout(), "");
+}
+
+/// A mutating operation that changes nothing but counts its runs.
+struct Touch {
+    runs: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Operation for Touch {
+    fn meta(&self) -> Meta {
+        Meta {
+            id: "test.touch",
+            name: "Touch",
+            summary: "Mutates nothing",
+            category: "Test",
+            class: Class::Mutate,
+        }
+    }
+
+    fn params(&self) -> Vec<Param> {
+        vec![Param::new("target").default("x")]
+    }
+
+    async fn run(&self, r: &mut Runner, _input: &Input) -> anyhow::Result<OpResult> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        r.mutate("touch", |_| async { Ok(()) }).await?;
+        Ok(OpResult {
+            views: vec![View::summary([("Touched", "yes")])],
+        })
+    }
+}
+
+/// Isolated services under `root` whose registry also holds [`Touch`], with
+/// `dev` allowlisted; returns the services and Touch's run counter.
+fn touch_services(root: &Path) -> (Services, Arc<AtomicUsize>) {
+    write(root, ".config/ss/config.yaml", "environments:\n  dev: {}\n");
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut services = Services::isolated(root);
+    services
+        .registry
+        .register(Arc::new(Touch {
+            runs: Arc::clone(&runs),
+        }))
+        .expect("register test.touch");
+    (services, runs)
+}
+
+#[tokio::test]
+async fn bad_op_param_value_is_usage() {
+    let (root, a, b) = diff_fixtures();
+    let (exit, out, err) = ss(
+        root.path(),
+        &[
+            "ss",
+            "run",
+            "demo.json-diff",
+            "--left",
+            &a,
+            "--right",
+            &b,
+            "--tolerance",
+            "abc",
+        ],
+    )
+    .await;
+    assert_eq!(exit, Exit::Usage);
+    assert_eq!(
+        err,
+        "ss run demo.json-diff: invalid tolerance \"abc\": invalid float literal\n"
+    );
+    assert_eq!(out, "");
+}
+
+#[tokio::test]
+async fn audit_write_failure_warns_and_keeps_the_exit_code() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (mut services, _) = touch_services(root.path());
+    write(root.path(), "state", "a regular file, not a directory");
+    services.vars.insert(
+        "XDG_STATE_HOME".to_owned(),
+        root.path().join("state").display().to_string(),
+    );
+    let (exit, out, err) = ss_with(
+        services,
+        &["ss", "run", "test.touch", "--env", "dev", "--yes"],
+    )
+    .await;
+    assert_eq!(exit, Exit::Ok, "{err}");
+    assert!(err.starts_with("warning: audit log: "), "{err}");
+    assert_eq!(err.lines().count(), 1, "{err}");
+    assert!(out.contains("Touched"), "{out}");
 }

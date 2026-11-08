@@ -50,6 +50,13 @@ pub(super) async fn run(
         .yes(global.yes)
         .user(app.user.clone())
         .cancel(app.cancel.clone())
+        .on_warning({
+            let stderr = io.stderr.clone();
+            move |w| {
+                // Nowhere is left to report a failure to write a warning.
+                let _ = writeln!(stderr.clone(), "warning: {w}");
+            }
+        })
         .confirmer(Arc::new(StdinConfirmer {
             stdin: io.stdin.clone(),
             stderr: io.stderr.clone(),
@@ -119,11 +126,11 @@ fn non_empty(flag: &Option<String>) -> Option<&str> {
     flag.as_deref().filter(|s| !s.is_empty())
 }
 
-/// A missing param is the user's to fix; Ctrl-C is an interruption; every
+/// A missing or invalid param is the user's to fix; Ctrl-C is an interruption; every
 /// other failure (step error, guard denial, decline) is the operation's.
 fn failure(f: RunFailure) -> Failure {
     match f.kind {
-        FailureKind::MissingParam => Failure::Usage(f.error),
+        FailureKind::Usage => Failure::Usage(f.error),
         FailureKind::Cancelled => Failure::Interrupted(f.error),
         FailureKind::Denied | FailureKind::Declined | FailureKind::Failed => {
             Failure::Failed(f.error)

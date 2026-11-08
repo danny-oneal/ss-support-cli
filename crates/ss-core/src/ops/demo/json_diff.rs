@@ -11,7 +11,8 @@ use crate::diff::{self, Opts};
 use crate::guard::Class;
 use crate::jsonutil;
 use crate::ops::{
-    Choice, Input, Meta, OpResult, Operation, Param, ParamType, Runner, SuggestFn, View,
+    Choice, Input, Meta, OpResult, Operation, Param, ParamType, Runner, RunnerError, SuggestFn,
+    View,
 };
 
 /// Diffs two local JSON files through the same engine the cloud diff
@@ -67,9 +68,11 @@ impl Operation for JsonDiff {
 
         let tolerance = match input.str("tolerance").trim() {
             "" => 0.0,
-            v => v
-                .parse::<f64>()
-                .with_context(|| format!("invalid tolerance {v:?}"))?,
+            v => v.parse::<f64>().map_err(|e| RunnerError::InvalidParam {
+                param: "tolerance".to_owned(),
+                value: v.to_owned(),
+                source: Box::new(e),
+            })?,
         };
 
         let (left_raw, right_raw) = r
@@ -287,8 +290,9 @@ mod tests {
             .execute(&JsonDiff, input)
             .await
             .expect_err("bad tolerance fails");
+        assert_eq!(failure.kind, FailureKind::Usage);
         let msg = format!("{:#}", failure.error);
-        assert!(msg.starts_with(r#"invalid tolerance "x": "#), "{msg}");
+        assert_eq!(msg, r#"invalid tolerance "x": invalid float literal"#);
     }
 
     #[test]
