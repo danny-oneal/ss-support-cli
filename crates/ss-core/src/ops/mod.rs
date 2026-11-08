@@ -14,5 +14,7 @@ pub use confirm::{ConfirmSpec, Confirmer};
 pub use input::Input;
 pub use operation::{BoxFuture, Choice, Deps, Meta, Operation, Param, ParamType, SuggestFn};
 pub use registry::{Registry, RegistryError};
-pub use runner::Runner;
+pub use runner::{
+    FailureKind, Progress, RunFailure, Runner, RunnerError, StepStatus, find_cause, with_defaults,
+};
 pub use view::{Node, OpResult, View};
