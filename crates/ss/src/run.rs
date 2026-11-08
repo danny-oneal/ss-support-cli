@@ -48,7 +48,6 @@ pub(crate) enum Failure {
     /// The command ran and failed.
     Failed(anyhow::Error),
     /// The command was stopped by Ctrl-C.
-    #[expect(dead_code, reason = "constructed once operation runs can be cancelled")]
     Interrupted(anyhow::Error),
 }
 
@@ -76,13 +75,7 @@ impl From<PresetError> for Failure {
 
 /// Everything a command needs, built once per invocation from the config
 /// file, the global flags, and the environment variables.
-#[expect(
-    dead_code,
-    reason = "the operation-only fields are read when an operation runs"
-)]
 pub(crate) struct App {
-    /// The parsed config file.
-    pub cfg: config::File,
     /// Infrastructure handed to operations.
     pub deps: Deps,
     /// Refuses writes outside allowlisted environments.
@@ -123,7 +116,6 @@ impl App {
             .unwrap_or_default()
             .to_owned();
         Ok(Self {
-            cfg,
             deps,
             guard,
             audit: Arc::new(FileLogger::new(audit::default_path(vars))),

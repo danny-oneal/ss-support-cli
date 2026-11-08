@@ -7,6 +7,7 @@
 
 mod cli;
 mod cmd;
+mod confirm;
 mod io;
 mod run;
 mod services;

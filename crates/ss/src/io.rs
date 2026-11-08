@@ -2,6 +2,7 @@
 //! callbacks, and confirmation prompts can all write to the same stderr and
 //! tests can capture everything in memory.
 
+use std::fmt;
 use std::io::{self, BufRead, BufReader, Cursor, Write};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -29,6 +30,15 @@ impl Write for Sink {
 
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         self.lock().write_all(buf)
+    }
+
+    /// Formats the whole message first and writes it under one lock, so a
+    /// line never interleaves with another writer's.
+    fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> io::Result<()> {
+        match args.as_str() {
+            Some(s) => self.write_all(s.as_bytes()),
+            None => self.write_all(args.to_string().as_bytes()),
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -167,6 +177,32 @@ mod tests {
             .expect("thread");
         assert_eq!(captured.stderr(), "one two");
         assert_eq!(captured.stdout(), "");
+    }
+
+    /// Records every `write` call as its own chunk.
+    struct Chunks(Arc<Mutex<Vec<String>>>);
+
+    impl Write for Chunks {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("lock")
+                .push(String::from_utf8_lossy(buf).into_owned());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn one_formatted_line_is_one_write() {
+        let chunks = Arc::new(Mutex::new(Vec::new()));
+        let mut sink = Sink::new(Chunks(Arc::clone(&chunks)));
+        let (step, n) = ("step", 3);
+        writeln!(sink, "→ {step} ({n:?})").expect("write");
+        assert_eq!(*chunks.lock().expect("lock"), ["→ step (3)\n"]);
     }
 
     #[test]
