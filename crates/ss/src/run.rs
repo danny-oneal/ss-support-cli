@@ -25,7 +25,8 @@ use crate::services::Services;
 pub enum Exit {
     /// The operation completed (a successful `--dry-run` included).
     Ok = 0,
-    /// The operation failed: step error, guard denied, operator declined.
+    /// The operation failed: step error, guard denied, operator declined, or
+    /// an unreadable config or presets file.
     Failed = 1,
     /// Usage or config error: bad flag value, unknown operation or format,
     /// unparsable config/presets file.

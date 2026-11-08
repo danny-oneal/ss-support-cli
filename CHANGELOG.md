@@ -18,6 +18,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Commands `ss ops list|describe`, `ss run <op>` (with `--preset`,
   `--save-preset`, `--export`, `-o json`), and `ss presets list|show|delete`.
 - Demo operations `demo.hello` and `demo.json-diff`.
+- Standalone repository layout: `Makefile` (`make check`, `make msrv`), CI
+  workflow, vendored diff golden fixtures, and `docs/`.
 
 ### Fixed
 - A bad operation param value (e.g. `--tolerance abc`) exits 2, not 1.

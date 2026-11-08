@@ -1,0 +1,59 @@
+# ss configuration — copy to ~/.config/ss/config.yaml (or point SS_CONFIG at it).
+#
+# SAFETY MODEL (DESIGN §8): only environments listed here are eligible for
+# Mutate/Destructive operations, and only when the resolved AWS account ID
+# and kube context match at run time. Anything not listed is read-only.
+# There is no override flag.
+
+default_env: dev
+
+environments:
+  dev:
+    profile: acme-dev          # AWS named profile (SSO / assume-role chains resolve via the SDK)
+    region: us-west-2
+    account_id: "111122223333" # checked against sts:GetCallerIdentity before writes
+    kube_context: dev-cluster  # checked against the current kubectl context before writes
+  staging:
+    profile: acme-staging
+    region: us-west-2
+    account_id: "444455556666"
+    kube_context: staging-cluster
+
+# Diff engine defaults (DESIGN §6.2). Operations add their own rules and
+# --ignore appends at runtime.
+diff:
+  # Fields that are pure noise — every diff shows them changed otherwise.
+  ignore:
+    - "**.updatedAt"
+    - "**.createdAt"
+    - "**.etag"
+    - "$.metadata.revision"
+  # Arrays matched by identity field instead of position, so an insertion
+  # at index 0 is one Added instead of N Changed.
+  array_match:
+    "$.rules[*]": id
+    "$.items[*]": id
+
+# record.trace domain locators (DESIGN §5.4). Record shapes differ per
+# domain; each entry teaches ss how to find a record and follow it to S3.
+# The common shape (hash/version/key/versionId/storeNumber) is the default —
+# only deviations need spelling out. versionId holds the literal S3 version
+# ID. Table/bucket names vary per environment: use {env} templates, or a
+# per-env override map when naming is irregular.
+trace:
+  domains:
+    common:
+      table: "ss-records-{env}"
+      bucket: "ss-config-{env}"
+      # defaults: hash_attr=hash, sort_attr unset, version_attr=version,
+      # s3_key_attr=key, s3_version_attr=versionId
+      labels: [storeNumber]
+    menu:
+      table: "ss-menu-{env}"
+      # tables: { staging: legacy-menus-stg }   # irregular names win over the template
+      bucket: "ss-config-{env}"
+      hash_attr: storeNumber
+      sort_attr: localeChannel
+      sort_format: "{locale}#{channel}"   # filled from --vars locale=…,channel=…
+      labels: [storeNumber, version]
+      namespace: menu                     # default ns for --configmap drift checks

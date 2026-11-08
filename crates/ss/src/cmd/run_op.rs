@@ -130,8 +130,9 @@ fn non_empty(flag: &Option<String>) -> Option<&str> {
     flag.as_deref().filter(|s| !s.is_empty())
 }
 
-/// A missing or invalid param is the user's to fix; Ctrl-C is an interruption; every
-/// other failure (step error, guard denial, decline) is the operation's.
+/// A missing or invalid param is the user's to fix; Ctrl-C, SIGTERM, and SIGHUP
+/// are an interruption; every other failure (step error, guard denial,
+/// decline) is the operation's.
 fn failure(f: RunFailure) -> Failure {
     match f.kind {
         FailureKind::Usage => Failure::Usage(f.error),

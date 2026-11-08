@@ -1,15 +1,21 @@
 # ss
 
-Support operations CLI for non-production AWS and Kubernetes resources: a
-Rust port of the Go `ss` tool in the parent directory, feature for feature.
+Support operations CLI for non-production AWS and Kubernetes resources,
+ported from an earlier implementation.
+
+## Build
 
 ```bash
-make rust-check            # fmt + clippy (-D warnings) + tests, from the repo root
+make check                          # fmt + clippy (-D warnings) + tests
+cargo build --release               # target/release/ss
+cargo install --path crates/ss      # install ss into ~/.cargo/bin
 cargo run -p ss -- --version
 ```
 
 Crates: `crates/ss-core` (diff engine, operations layer, ports; no AWS
 dependencies) and `crates/ss` (the binary: CLI, TUI, AWS adapters).
+`make help` lists every target; `docs/` holds the design notes, testing
+plan, and an example config.
 
 ## CLI
 
