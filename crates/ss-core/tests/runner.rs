@@ -9,8 +9,8 @@ use ss_core::audit::{Entry, FileLogger, Logger, Outcome};
 use ss_core::config::Environment;
 use ss_core::guard::{Class, EnvAllowlist, GuardError};
 use ss_core::ops::{
-    Deps, FailureKind, Input, Meta, OpResult, Operation, Param, Progress, Runner, RunnerError,
-    StepStatus, View, find_cause,
+    ConfirmSpec, Confirmer, Deps, FailureKind, Input, Meta, OpResult, Operation, Param, Progress,
+    Runner, RunnerError, StepStatus, View, find_cause,
 };
 
 #[derive(Clone)]
@@ -21,12 +21,16 @@ enum Act {
     AssertInt(&'static str, i64),
     StopDry,
     Decline,
+    Mutate(&'static str),
+    Preview,
+    Resource(&'static str),
 }
 
 struct Script {
     meta: Meta,
     params: Vec<Param>,
     acts: Vec<Act>,
+    runs: Arc<AtomicUsize>,
     mutated: Arc<AtomicUsize>,
 }
 
@@ -41,8 +45,23 @@ fn script(class: Class, acts: Vec<Act>) -> Script {
         },
         params: Vec::new(),
         acts,
+        runs: Arc::new(AtomicUsize::new(0)),
         mutated: Arc::new(AtomicUsize::new(0)),
     }
+}
+
+fn writer(class: Class) -> Script {
+    let mut op = script(
+        class,
+        vec![
+            Act::Preview,
+            Act::Resource("cfg-nonprod/tenants/acme.json"),
+            Act::Mutate("write one"),
+            Act::Mutate("write two"),
+        ],
+    );
+    op.meta.id = "test.write";
+    op
 }
 
 #[async_trait]
@@ -56,7 +75,7 @@ impl Operation for Script {
     }
 
     async fn run(&self, r: &mut Runner, input: &Input) -> anyhow::Result<OpResult> {
-        self.mutated.fetch_add(1, Ordering::SeqCst);
+        self.runs.fetch_add(1, Ordering::SeqCst);
         for act in &self.acts {
             match act.clone() {
                 Act::Step(name) => r.step(name, |_| async { Ok(()) }).await?,
@@ -80,6 +99,16 @@ impl Operation for Script {
                     })
                     .context("test.op"));
                 }
+                Act::Mutate(name) => {
+                    let mutated = self.mutated.clone();
+                    r.mutate(name, |_| async move {
+                        mutated.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                    .await?
+                }
+                Act::Preview => r.preview([View::summary([("About to", "write things")])]),
+                Act::Resource(name) => r.set_resource(name),
                 Act::AssertInt(k, n) => {
                     if input.int(k) != n {
                         anyhow::bail!("expected {k}={n}");
@@ -90,6 +119,28 @@ impl Operation for Script {
         Ok(OpResult {
             views: vec![View::summary([("Done", "yes")])],
         })
+    }
+}
+
+struct RecordingConfirmer {
+    specs: Mutex<Vec<ConfirmSpec>>,
+    answer: Result<bool, &'static str>,
+}
+
+impl RecordingConfirmer {
+    fn new(answer: Result<bool, &'static str>) -> Arc<Self> {
+        Arc::new(RecordingConfirmer {
+            specs: Mutex::new(Vec::new()),
+            answer,
+        })
+    }
+}
+
+#[async_trait]
+impl Confirmer for RecordingConfirmer {
+    async fn confirm(&self, spec: ConfirmSpec) -> anyhow::Result<bool> {
+        self.specs.lock().unwrap().push(spec);
+        self.answer.map_err(|e| anyhow::anyhow!(e))
     }
 }
 
@@ -190,7 +241,7 @@ async fn required_param_and_defaults() {
         .unwrap_err();
     assert_eq!(f.kind, FailureKind::MissingParam);
     assert_eq!(f.error.to_string(), r#"required param "bucket" missing"#);
-    assert_eq!(op.mutated.load(Ordering::SeqCst), 0);
+    assert_eq!(op.runs.load(Ordering::SeqCst), 0);
 
     let input: Input = [("bucket", "b")].into_iter().collect();
     Runner::new(Deps::default())
@@ -226,7 +277,7 @@ async fn guard_denial_beats_yes_and_is_audited() {
         .await
         .unwrap_err();
     assert_eq!(f.kind, FailureKind::Denied);
-    assert_eq!(op.mutated.load(Ordering::SeqCst), 0);
+    assert_eq!(op.runs.load(Ordering::SeqCst), 0);
     let entries = audit.entries.lock().unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].outcome, Outcome::Denied);
@@ -244,7 +295,8 @@ async fn guard_denial_beats_yes_and_is_audited() {
 async fn non_read_runs_are_audited() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("audit.log");
-    let op = script(Class::Mutate, vec![Act::Step("change")]);
+    let mut op = script(Class::Mutate, vec![Act::Step("change")]);
+    op.params = vec![Param::new("mode").default("fast")];
     let deps = Deps {
         env: Environment {
             name: "dev".into(),
@@ -271,7 +323,7 @@ async fn non_read_runs_are_audited() {
     assert_eq!(v["user"], "danny");
     assert_eq!(v["env"], "dev");
     assert_eq!(v["account"], "123");
-    assert_eq!(v["params"], serde_json::json!({"x": "1"}));
+    assert_eq!(v["params"], serde_json::json!({"x": "1", "mode": "fast"}));
 }
 
 #[tokio::test]
@@ -336,6 +388,23 @@ async fn audit_write_failure_does_not_change_the_outcome() {
         .await
         .unwrap();
     assert_eq!(quiet, failing);
+
+    let broken = script(Class::Mutate, vec![Act::FailStep("change", "boom")]);
+    let quiet = Runner::new(Deps::default())
+        .yes(true)
+        .execute(&broken, Input::default())
+        .await
+        .unwrap_err();
+    let failing = Runner::new(Deps::default())
+        .yes(true)
+        .audit(Arc::new(FailingAudit))
+        .execute(&broken, Input::default())
+        .await
+        .unwrap_err();
+    assert_eq!(quiet.kind, FailureKind::Failed);
+    assert_eq!(failing.kind, FailureKind::Failed);
+    assert_eq!(format!("{:#}", failing.error), "change: boom");
+    assert_eq!(format!("{:#}", quiet.error), format!("{:#}", failing.error));
 }
 
 #[tokio::test]
@@ -381,6 +450,7 @@ async fn declined_run_carries_a_summary_and_is_audited() {
         ])]
     );
     let entries = audit.entries.lock().unwrap();
+    assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].outcome, Outcome::Declined);
     assert_eq!(
         entries[0].error.as_deref(),
@@ -398,4 +468,170 @@ fn find_cause_looks_through_context_layers() {
         Some(RunnerError::Cancelled)
     ));
     assert!(find_cause::<GuardError>(&err).is_none());
+}
+
+#[tokio::test]
+async fn confirm_asks_once_per_run_with_preview() {
+    let op = writer(Class::Mutate);
+    let confirmer = RecordingConfirmer::new(Ok(true));
+    Runner::new(Deps::default())
+        .confirmer(confirmer.clone())
+        .execute(&op, Input::default())
+        .await
+        .unwrap();
+    assert_eq!(op.mutated.load(Ordering::SeqCst), 2);
+    let specs = confirmer.specs.lock().unwrap();
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].op_id, "test.write");
+    assert_eq!(specs[0].class, Class::Mutate);
+    assert_eq!(specs[0].step, "write one");
+    assert_eq!(specs[0].resource, "cfg-nonprod/tenants/acme.json");
+    assert_eq!(specs[0].preview.len(), 1);
+}
+
+#[tokio::test]
+async fn resource_defaults_to_op_id() {
+    let mut op = writer(Class::Mutate);
+    op.acts.retain(|a| !matches!(a, Act::Resource(_)));
+    let confirmer = RecordingConfirmer::new(Ok(true));
+    Runner::new(Deps::default())
+        .confirmer(confirmer.clone())
+        .execute(&op, Input::default())
+        .await
+        .unwrap();
+    assert_eq!(confirmer.specs.lock().unwrap()[0].resource, "test.write");
+}
+
+#[tokio::test]
+async fn decline_stops_before_mutation_and_audits_declined() {
+    let op = writer(Class::Mutate);
+    let audit = Arc::new(RecordingAudit::default());
+    let f = Runner::new(Deps::default())
+        .confirmer(RecordingConfirmer::new(Ok(false)))
+        .audit(audit.clone())
+        .execute(&op, Input::default())
+        .await
+        .unwrap_err();
+    assert_eq!(f.kind, FailureKind::Declined);
+    assert_eq!(op.mutated.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        f.views,
+        [View::summary([
+            ("Operation", "test.write"),
+            (
+                "Outcome",
+                "declined: stopped before the first mutating step"
+            ),
+        ])]
+    );
+    assert!(matches!(
+        find_cause::<GuardError>(&f.error),
+        Some(GuardError::NotConfirmed { .. })
+    ));
+    let entries = audit.entries.lock().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].outcome, Outcome::Declined);
+}
+
+#[tokio::test]
+async fn confirmer_error_is_a_failure_not_a_decline() {
+    let op = writer(Class::Mutate);
+    let audit = Arc::new(RecordingAudit::default());
+    let f = Runner::new(Deps::default())
+        .confirmer(RecordingConfirmer::new(Err("tty gone")))
+        .audit(audit.clone())
+        .execute(&op, Input::default())
+        .await
+        .unwrap_err();
+    assert_eq!(f.kind, FailureKind::Failed);
+    assert!(format!("{:#}", f.error).contains("tty gone"));
+    assert_eq!(op.mutated.load(Ordering::SeqCst), 0);
+    let entries = audit.entries.lock().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].outcome, Outcome::Error);
+}
+
+#[tokio::test]
+async fn yes_covers_mutate_only() {
+    let op = writer(Class::Mutate);
+    Runner::new(Deps::default())
+        .yes(true)
+        .execute(&op, Input::default())
+        .await
+        .unwrap();
+    assert_eq!(op.mutated.load(Ordering::SeqCst), 2);
+
+    let op = writer(Class::Destructive);
+    let confirmer = RecordingConfirmer::new(Ok(true));
+    Runner::new(Deps::default())
+        .yes(true)
+        .confirmer(confirmer.clone())
+        .execute(&op, Input::default())
+        .await
+        .unwrap();
+    let specs = confirmer.specs.lock().unwrap();
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].class, Class::Destructive);
+}
+
+#[tokio::test]
+async fn yes_never_covers_destructive_without_a_confirmer() {
+    let op = writer(Class::Destructive);
+    let f = Runner::new(Deps::default())
+        .yes(true)
+        .execute(&op, Input::default())
+        .await
+        .unwrap_err();
+    assert_eq!(f.kind, FailureKind::Declined);
+    assert_eq!(op.mutated.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        f.error.to_string(),
+        "no confirmer available: operation not confirmed"
+    );
+}
+
+#[tokio::test]
+async fn missing_confirmer_fails_closed() {
+    let op = writer(Class::Mutate);
+    let f = Runner::new(Deps::default())
+        .execute(&op, Input::default())
+        .await
+        .unwrap_err();
+    assert_eq!(f.kind, FailureKind::Declined);
+    assert_eq!(op.mutated.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn dry_run_skips_confirmation_entirely() {
+    let op = writer(Class::Mutate);
+    let confirmer = RecordingConfirmer::new(Ok(true));
+    let audit = Arc::new(RecordingAudit::default());
+    let (log, sink) = progress_log();
+    let result = Runner::new(Deps::default())
+        .dry_run(true)
+        .confirmer(confirmer.clone())
+        .audit(audit.clone())
+        .progress(sink)
+        .execute(&op, Input::default())
+        .await
+        .unwrap();
+    assert_eq!(op.mutated.load(Ordering::SeqCst), 0);
+    assert!(confirmer.specs.lock().unwrap().is_empty());
+    assert_eq!(
+        result.views[0],
+        View::summary([
+            ("Operation", "test.write"),
+            ("Outcome", "dry-run: stopped before the first mutating step"),
+        ])
+    );
+    assert!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.step == "write one" && p.status == StepStatus::Skipped)
+    );
+    let entries = audit.entries.lock().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].outcome, Outcome::DryRun);
+    assert_eq!(entries[0].error, None);
 }

@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::audit::{self, Entry, Logger, Outcome};
 use crate::guard::{AllowAll, Class, Guard, GuardError, Request};
 
-use super::{Confirmer, Deps, Input, Meta, OpResult, Operation, View};
+use super::{ConfirmSpec, Confirmer, Deps, Input, Meta, OpResult, Operation, View};
 
 /// The lifecycle of one step.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -104,7 +104,6 @@ pub fn with_defaults(op: &dyn Operation, mut input: Input) -> Input {
 
 /// State that lives for one run and is reset by [`Runner::execute`].
 #[derive(Default)]
-#[allow(dead_code)]
 struct RunState {
     meta: Option<Meta>,
     preview: Vec<View>,
@@ -333,6 +332,74 @@ impl Runner {
                 self.emit(name, StepStatus::Failed, elapsed, Some(format!("{e:#}")));
                 Err(e.context(name.to_owned()))
             }
+        }
+    }
+
+    /// Registers what is about to change so the confirmation can show it.
+    /// Call it before the first mutating step.
+    pub fn preview(&mut self, views: impl IntoIterator<Item = View>) {
+        self.state.preview.extend(views);
+    }
+
+    /// Names the resource a destructive operation will affect; the operator
+    /// must type it back to proceed.
+    pub fn set_resource(&mut self, s: impl Into<String>) {
+        self.state.resource = s.into();
+    }
+
+    /// [`Runner::step`] for state-changing work. A dry run stops here, before
+    /// anything changes. The first mutating step of a run collects the
+    /// operator's confirmation; `--yes` covers mutating operations but never
+    /// destructive ones, and a missing confirmer fails closed.
+    pub async fn mutate<F, Fut, T>(&mut self, name: &str, f: F) -> anyhow::Result<T>
+    where
+        F: FnOnce(CancellationToken) -> Fut,
+        Fut: Future<Output = anyhow::Result<T>>,
+    {
+        if self.dry_run {
+            self.emit(name, StepStatus::Skipped, Duration::ZERO, None);
+            return Err(RunnerError::DryRun.into());
+        }
+        if !self.state.confirmed {
+            if let Err(e) = self.confirm(name).await {
+                self.emit(name, StepStatus::Skipped, Duration::ZERO, None);
+                return Err(e);
+            }
+            self.state.confirmed = true;
+        }
+        self.step(name, f).await
+    }
+
+    async fn confirm(&self, step: &str) -> anyhow::Result<()> {
+        let meta = self
+            .state
+            .meta
+            .ok_or_else(|| anyhow::anyhow!("no operation is running"))?;
+        if meta.class == Class::Mutate && self.yes {
+            return Ok(());
+        }
+        let op = meta.id.to_owned();
+        let Some(confirmer) = &self.confirmer else {
+            return Err(GuardError::NoConfirmer { op }.into());
+        };
+        let resource = if self.state.resource.is_empty() {
+            meta.id.to_owned()
+        } else {
+            self.state.resource.clone()
+        };
+        let confirmed = confirmer
+            .confirm(ConfirmSpec {
+                op_id: op.clone(),
+                class: meta.class,
+                resource,
+                step: step.to_owned(),
+                preview: self.state.preview.clone(),
+            })
+            .await?;
+        if confirmed {
+            Ok(())
+        } else {
+            Err(GuardError::NotConfirmed { op }.into())
         }
     }
 
