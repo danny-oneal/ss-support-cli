@@ -5,10 +5,15 @@ use chrono::{DateTime, Utc};
 
 use super::SvcError;
 
+mod cached;
 #[cfg(any(test, feature = "test-support"))]
 pub mod contract;
 #[cfg(any(test, feature = "test-support"))]
 mod fake;
+mod lazy;
+
+pub use cached::Cached;
+pub use lazy::Lazy;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use fake::FakeS3;
