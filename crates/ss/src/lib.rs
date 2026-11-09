@@ -5,7 +5,6 @@
 //! testable lives here so the end-to-end suite can call [`run_with`]
 //! in-process with captured [`Io`].
 
-#[allow(dead_code)]
 mod aws;
 mod cli;
 mod cmd;
@@ -19,4 +18,4 @@ pub use cli::{
 };
 pub use io::{Captured, Io, Sink, Source};
 pub use run::{Exit, run, run_with, run_with_interrupt};
-pub use services::Services;
+pub use services::{S3Factory, Services};

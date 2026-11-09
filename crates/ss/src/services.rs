@@ -2,17 +2,27 @@
 //! environment variable snapshot every path and default is resolved against.
 
 use std::path::Path;
+use std::sync::Arc;
 
+use ss_core::config::Environment;
 use ss_core::ops::{self, Registry};
+use ss_core::svc::s3::{Lazy, S3Port};
 use ss_core::vars::{self, Vars};
 
-/// The registry and variables one invocation runs against.
+use crate::aws;
+
+/// Builds the S3 port for the resolved environment and variable snapshot.
+pub type S3Factory = Arc<dyn Fn(&Environment, &Vars) -> Arc<dyn S3Port> + Send + Sync>;
+
+/// The registry, variables, and S3 source one invocation runs against.
 #[derive(Clone)]
 pub struct Services {
     /// Every operation the CLI can run.
     pub registry: Registry,
     /// The environment variables paths and defaults are resolved from.
     pub vars: Vars,
+    /// Builds the S3 port for the resolved environment.
+    pub s3: S3Factory,
 }
 
 impl Services {
@@ -21,6 +31,7 @@ impl Services {
         Self {
             registry: ops::builtin(),
             vars: vars::process(),
+            s3: aws::s3_factory(),
         }
     }
 
@@ -34,7 +45,18 @@ impl Services {
                 ("HOME".to_owned(), root.display().to_string()),
                 ("USER".to_owned(), "tester".to_owned()),
             ]),
+            s3: Arc::new(|_, _| {
+                Arc::new(Lazy::new(|| {
+                    Box::pin(async { Err(anyhow::anyhow!("S3 is not configured")) })
+                }))
+            }),
         }
+    }
+
+    /// These services with every invocation using `port` for S3.
+    pub fn with_s3(mut self, port: Arc<dyn S3Port>) -> Self {
+        self.s3 = Arc::new(move |_, _| Arc::clone(&port));
+        self
     }
 }
 
