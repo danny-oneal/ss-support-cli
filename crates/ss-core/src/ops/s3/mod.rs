@@ -10,6 +10,9 @@ use crate::svc::s3::{CURRENT, S3Port};
 
 #[cfg(test)]
 pub(crate) mod fixture;
+mod version_diff;
+
+pub use version_diff::VersionDiff;
 
 /// The S3 port of `deps`, or an error when the invocation has none.
 pub(crate) fn port(deps: &Deps) -> anyhow::Result<Arc<dyn S3Port>> {
