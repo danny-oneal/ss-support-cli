@@ -50,3 +50,33 @@ jobs:
 
       - name: Check on the minimum supported Rust
         run: cargo +1.88 check --workspace --all-targets --locked
+
+  # The S3 adapter against a real versioned S3-compatible store.
+  contract:
+    name: S3 contract (MinIO)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Start MinIO
+        run: docker run -d -p 9000:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin minio/minio server /data
+
+      - name: Wait for MinIO
+        run: |
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:9000/minio/health/live && exit 0
+            sleep 1
+          done
+          echo "MinIO did not become healthy" >&2
+          exit 1
+
+      - name: Contract suite
+        env:
+          SS_S3_TEST_ENDPOINT: http://127.0.0.1:9000
+        run: make contract

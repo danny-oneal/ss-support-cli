@@ -28,6 +28,12 @@ check: lint test
 msrv:
 	cargo +1.88 check --workspace --all-targets --locked
 
+## contract: S3 contract suite against MinIO (needs SS_S3_TEST_ENDPOINT, e.g. http://127.0.0.1:9000)
+.PHONY: contract
+contract:
+	@test -n "$(SS_S3_TEST_ENDPOINT)" || { echo "set SS_S3_TEST_ENDPOINT"; exit 2; }
+	cargo test -p ss aws::s3::minio -- --nocapture
+
 ## clean: remove build artifacts
 .PHONY: clean
 clean:
