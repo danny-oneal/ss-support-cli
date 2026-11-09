@@ -84,7 +84,8 @@ or no credentials at all, is reported with the `aws sso login --profile
 bypasses the cache. Bodies over 32 MiB are refused.
 
 **S3-compatible endpoints.** With `SS_S3_ENDPOINT` set, S3 calls go to that
-endpoint using path-style addressing, and the identity check is skipped.
+endpoint using path-style addressing, and the identity check is skipped;
+credentials are still resolved first.
 
 ### Trying it against MinIO
 
@@ -93,9 +94,16 @@ docker run -d --rm --name ss-minio -p 9000:9000 \
   -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
   minio/minio server /data
 
-AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin \
-  SS_REGION=us-east-1 SS_S3_ENDPOINT=http://127.0.0.1:9000 \
-  ss run s3.prefix-audit --bucket <bucket>
+export AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin AWS_REGION=us-east-1
+
+# ss only reads: create and seed a versioned bucket with the AWS CLI
+aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://demo
+aws --endpoint-url http://127.0.0.1:9000 s3api put-bucket-versioning \
+  --bucket demo --versioning-configuration Status=Enabled
+aws --endpoint-url http://127.0.0.1:9000 s3 cp ./acme.json s3://demo/cfg/acme.json
+
+SS_REGION=us-east-1 SS_S3_ENDPOINT=http://127.0.0.1:9000 \
+  ss run s3.prefix-audit --bucket demo --prefix cfg/
 ```
 
 `SS_S3_TEST_ENDPOINT=http://127.0.0.1:9000 make contract` runs the S3
