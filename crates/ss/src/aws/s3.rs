@@ -173,11 +173,23 @@ impl S3Port for AwsS3 {
                         is_delete: true,
                     }),
             );
-            if !out.is_truncated().unwrap_or(false) {
+            let saw_other_key = out
+                .versions()
+                .iter()
+                .map(|v| v.key())
+                .chain(out.delete_markers().iter().map(|m| m.key()))
+                .any(|k| k != Some(key));
+            let Some((next_key, next_version)) = next_markers(
+                key,
+                out.is_truncated().unwrap_or(false),
+                saw_other_key,
+                out.next_key_marker(),
+                out.next_version_id_marker(),
+            ) else {
                 break;
-            }
-            key_marker = out.next_key_marker().map(str::to_owned);
-            version_id_marker = out.next_version_id_marker().map(str::to_owned);
+            };
+            key_marker = next_key;
+            version_id_marker = next_version;
         }
         if versions.is_empty() {
             return Err(SvcError::not_found(what));
@@ -303,6 +315,27 @@ fn is_not_found(
         && message.is_some_and(|m| m.to_lowercase().contains("version id"))
 }
 
+/// The key and version-id markers for the next `ListObjectVersions` page of
+/// `key`, or `None` when the walk is over.
+///
+/// Listings with `key` as the prefix are sorted by key, and `key` sorts
+/// before every sibling it prefixes, so all of its entries come first. The
+/// walk ends on the last page, once a page holds an entry for another key, or
+/// when the next page would not resume within `key` — including a truncated
+/// page that names no next key.
+fn next_markers(
+    key: &str,
+    truncated: bool,
+    saw_other_key: bool,
+    next_key: Option<&str>,
+    next_version: Option<&str>,
+) -> Option<(Option<String>, Option<String>)> {
+    if !truncated || saw_other_key || next_key != Some(key) {
+        return None;
+    }
+    Some((Some(key.to_owned()), next_version.map(str::to_owned)))
+}
+
 /// An SDK timestamp in UTC.
 fn utc(t: Option<&SdkDateTime>) -> Option<DateTime<Utc>> {
     t.and_then(|t| DateTime::from_timestamp(t.secs(), t.subsec_nanos()))
@@ -355,6 +388,28 @@ mod tests {
                 "{code:?} {msg:?} {status:?} {had}"
             );
         }
+    }
+
+    #[test]
+    fn version_paging_stops_once_the_key_is_exhausted() {
+        const KEY: &str = "cfg/a.json";
+        let markers = |k: &str, v: &str| Some((Some(k.to_owned()), Some(v.to_owned())));
+        // More versions of the key itself: keep going.
+        assert_eq!(
+            next_markers(KEY, true, false, Some(KEY), Some("v9")),
+            markers(KEY, "v9")
+        );
+        // The last page.
+        assert_eq!(next_markers(KEY, false, false, Some(KEY), Some("v9")), None);
+        // A sibling key showed up on this page: the key's entries are done.
+        assert_eq!(next_markers(KEY, true, true, Some(KEY), Some("v9")), None);
+        // The next page starts at a sibling key.
+        assert_eq!(
+            next_markers(KEY, true, false, Some("cfg/a.json.bak"), Some("v1")),
+            None
+        );
+        // Truncated but without markers: no way to make progress.
+        assert_eq!(next_markers(KEY, true, false, None, None), None);
     }
 }
 
