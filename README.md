@@ -76,8 +76,9 @@ ss run s3.prefix-audit --bucket my-bucket --prefix cfg/ --top 5
 supplies the AWS profile and region; `--profile` / `SS_PROFILE` and
 `--region` / `SS_REGION` override them. When the environment sets
 `account_id`, the caller identity is checked against it before the first S3
-call, and a mismatch stops the run. An expired SSO session is reported with
-the `aws sso login --profile <name>` command to run.
+call, and a mismatch stops the run. An expired or never-started SSO session,
+or no credentials at all, is reported with the `aws sso login --profile
+<name>` command to run.
 
 **Cache and limits.** Fetched object versions are cached locally; `--no-cache`
 bypasses the cache. Bodies over 32 MiB are refused.

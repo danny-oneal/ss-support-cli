@@ -51,3 +51,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   silently dropped; the exit code is unchanged.
 - `s3.object-inspect` on a deleted object shows the delete marker and the
   full version history instead of failing.
+- Missing AWS credentials and a never-started or rejected SSO session name
+  the `aws sso login --profile` command instead of a raw SDK error, also with
+  `SS_S3_ENDPOINT` set; with no profile in the environment the hint names
+  `AWS_PROFILE`'s.

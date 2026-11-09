@@ -6,6 +6,7 @@
 
 use anyhow::anyhow;
 use aws_config::{BehaviorVersion, Region, SdkConfig};
+use aws_sdk_s3::config::ProvideCredentials;
 use ss_core::config::Environment;
 
 /// The resolved caller, feeding the account guardrail.
@@ -41,6 +42,20 @@ pub(crate) async fn check_identity(cfg: &SdkConfig, profile: &str) -> anyhow::Re
     })
 }
 
+/// Resolves the configured credentials once, turning authentication failures
+/// into actionable errors. A configuration without a credentials provider
+/// passes.
+pub(crate) async fn check_credentials(cfg: &SdkConfig, profile: &str) -> anyhow::Result<()> {
+    let Some(provider) = cfg.credentials_provider() else {
+        return Ok(());
+    };
+    provider
+        .provide_credentials()
+        .await
+        .map_err(|e| friendly(anyhow::Error::from(e), profile))?;
+    Ok(())
+}
+
 /// Reports whether an error chain looks like an expired or absent SSO session.
 pub(crate) fn is_expired_sso(chain: &str) -> bool {
     [
@@ -49,25 +64,39 @@ pub(crate) fn is_expired_sso(chain: &str) -> bool {
         "InvalidGrantException",
         "ExpiredToken",
         "failed to refresh cached credentials",
+        "failed to load the cached SSO token",
+        "UnauthorizedException",
     ]
     .iter()
     .any(|needle| chain.contains(needle))
 }
 
-/// Adds the login command to an expired-SSO error; other errors pass through
-/// unchanged.
+/// Reports whether an error chain says no credential source produced
+/// credentials at all.
+pub(crate) fn is_missing_credentials(chain: &str) -> bool {
+    chain.contains("no providers in chain provided credentials")
+}
+
+/// Adds the login command to an expired-SSO or missing-credentials error;
+/// other errors pass through unchanged. The whole error chain is searched.
 pub(crate) fn friendly(err: anyhow::Error, profile: &str) -> anyhow::Error {
-    if !is_expired_sso(&format!("{err:#}")) {
-        return err;
-    }
+    let chain = format!("{err:#}");
     let p = if profile.is_empty() {
         "<profile>"
     } else {
         profile
     };
-    err.context(format!(
-        "SSO session expired — run `aws sso login --profile {p}`"
-    ))
+    if is_expired_sso(&chain) {
+        err.context(format!(
+            "SSO session expired — run `aws sso login --profile {p}`"
+        ))
+    } else if is_missing_credentials(&chain) {
+        err.context(format!(
+            "no AWS credentials for profile {p} — run `aws sso login --profile {p}` or set AWS_PROFILE"
+        ))
+    } else {
+        err
+    }
 }
 
 /// Refuses to continue when the credentials resolve to a different account
@@ -98,6 +127,8 @@ mod tests {
             "InvalidGrantException",
             "ExpiredToken",
             "failed to refresh cached credentials",
+            "failed to load the cached SSO token",
+            "UnauthorizedException",
         ] {
             assert!(
                 is_expired_sso(&format!("dispatch failure: {needle}: details")),
@@ -119,6 +150,93 @@ mod tests {
         assert_eq!(
             format!("{:#}", friendly(anyhow!("AccessDenied"), "dev")),
             "AccessDenied"
+        );
+    }
+
+    #[test]
+    fn a_never_logged_in_sso_session_names_the_login_command() {
+        let e = friendly(anyhow!("failed to load the cached SSO token"), "dev");
+        assert_eq!(
+            format!("{e:#}"),
+            "SSO session expired — run `aws sso login --profile dev`: failed to load the cached SSO token"
+        );
+    }
+
+    #[test]
+    fn an_unauthorized_legacy_sso_token_names_the_login_command() {
+        let e = friendly(
+            anyhow!("UnauthorizedException: Session token not found or invalid"),
+            "dev",
+        );
+        assert_eq!(
+            format!("{e:#}"),
+            "SSO session expired — run `aws sso login --profile dev`: UnauthorizedException: Session token not found or invalid"
+        );
+    }
+
+    #[test]
+    fn the_whole_error_chain_is_searched() {
+        let nested = anyhow!("failed to load the cached SSO token")
+            .context("an error occurred while loading credentials")
+            .context("dispatch failure");
+        let e = friendly(nested, "dev");
+        assert_eq!(
+            e.to_string(),
+            "SSO session expired — run `aws sso login --profile dev`"
+        );
+        assert!(
+            format!("{e:#}").ends_with(": dispatch failure: an error occurred while loading credentials: failed to load the cached SSO token"),
+            "{e:#}"
+        );
+    }
+
+    #[test]
+    fn missing_credentials_name_the_login_command_and_aws_profile() {
+        let raw =
+            || anyhow!("no providers in chain provided credentials").context("dispatch failure");
+        assert_eq!(
+            format!("{:#}", friendly(raw(), "dev")),
+            "no AWS credentials for profile dev — run `aws sso login --profile dev` or set AWS_PROFILE: dispatch failure: no providers in chain provided credentials"
+        );
+        assert_eq!(
+            friendly(raw(), "").to_string(),
+            "no AWS credentials for profile <profile> — run `aws sso login --profile <profile>` or set AWS_PROFILE"
+        );
+    }
+
+    // aws-config exposes in-memory profile files only through deprecated
+    // aliases; they keep this test off the real `~/.aws` files.
+    #[allow(deprecated)]
+    #[tokio::test]
+    async fn check_credentials_resolves_or_explains() {
+        use aws_config::meta::credentials::CredentialsProviderChain;
+        use aws_config::profile::ProfileFileCredentialsProvider;
+        use aws_config::profile::profile_file::{ProfileFileKind, ProfileFiles};
+        use aws_sdk_s3::config::{Credentials, SharedCredentialsProvider};
+
+        let with = |provider: SharedCredentialsProvider| {
+            SdkConfig::builder().credentials_provider(provider).build()
+        };
+        let fixed = Credentials::new("key", "secret", None, None, "static");
+        check_credentials(&with(SharedCredentialsProvider::new(fixed)), "dev")
+            .await
+            .expect("static credentials resolve");
+
+        let no_profiles = ProfileFileCredentialsProvider::builder()
+            .profile_files(
+                ProfileFiles::builder()
+                    .with_contents(ProfileFileKind::Config, "")
+                    .with_contents(ProfileFileKind::Credentials, "")
+                    .build(),
+            )
+            .build();
+        let empty = CredentialsProviderChain::first_try("profile", no_profiles);
+        let err = check_credentials(&with(SharedCredentialsProvider::new(empty)), "dev")
+            .await
+            .expect_err("nothing provides credentials");
+        assert_eq!(
+            err.to_string(),
+            "no AWS credentials for profile dev — run `aws sso login --profile dev` or set AWS_PROFILE"
         );
     }
 
