@@ -34,6 +34,9 @@ pub fn builtin() -> Registry {
         .register(Arc::new(demo::JsonDiff))
         .expect("builtin operation ids are unique");
     registry
+        .register(Arc::new(s3::ObjectInspect))
+        .expect("builtin operation ids are unique");
+    registry
         .register(Arc::new(s3::VersionDiff))
         .expect("builtin operation ids are unique");
     registry
@@ -46,6 +49,14 @@ mod tests {
     #[test]
     fn builtin_registers_every_operation() {
         let ids: Vec<_> = builtin().all().iter().map(|op| op.meta().id).collect();
-        assert_eq!(ids, ["demo.hello", "demo.json-diff", "s3.version-diff"]);
+        assert_eq!(
+            ids,
+            [
+                "demo.hello",
+                "demo.json-diff",
+                "s3.object-inspect",
+                "s3.version-diff"
+            ]
+        );
     }
 }
