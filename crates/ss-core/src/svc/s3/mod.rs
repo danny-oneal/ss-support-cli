@@ -6,6 +6,8 @@ use chrono::{DateTime, Utc};
 use super::SvcError;
 
 #[cfg(any(test, feature = "test-support"))]
+pub mod contract;
+#[cfg(any(test, feature = "test-support"))]
 mod fake;
 
 #[cfg(any(test, feature = "test-support"))]
