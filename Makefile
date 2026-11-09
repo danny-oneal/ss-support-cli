@@ -32,7 +32,7 @@ msrv:
 .PHONY: contract
 contract:
 	@test -n "$(SS_S3_TEST_ENDPOINT)" || { echo "set SS_S3_TEST_ENDPOINT"; exit 2; }
-	cargo test -p ss aws::s3::minio -- --nocapture
+	cargo test --locked -p ss aws::s3::minio -- --nocapture
 
 ## clean: remove build artifacts
 .PHONY: clean
