@@ -121,6 +121,7 @@ impl App {
             env,
             diff: cfg.diff.clone(),
             trace: cfg.trace.clone(),
+            s3: None,
         };
         let user = ["USER", "LOGNAME"]
             .into_iter()

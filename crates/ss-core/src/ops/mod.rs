@@ -11,6 +11,8 @@ mod input;
 mod operation;
 mod registry;
 mod runner;
+#[cfg_attr(not(test), allow(dead_code))]
+pub mod s3;
 mod view;
 
 pub use confirm::{ConfirmSpec, Confirmer};
