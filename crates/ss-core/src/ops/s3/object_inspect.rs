@@ -7,7 +7,7 @@ use super::{port, short_id, suggest_buckets, suggest_keys, suggest_versions, tim
 use crate::guard::Class;
 use crate::jsonutil;
 use crate::ops::{Input, Meta, OpResult, Operation, Param, Runner, View};
-use crate::svc::s3::Version;
+use crate::svc::s3::{Object, Version, is_current};
 
 /// The most body bytes shown for a body that is not JSON.
 const PREVIEW_BYTES: usize = 4096;
@@ -57,21 +57,51 @@ impl Operation for ObjectInspect {
                 async move { Ok(s3.list_versions(bucket, key).await?) }
             })
             .await?;
-        let object = r
+        let version = input.str("version");
+        // The newest entry, when it is a delete marker and the current version
+        // was asked for: the object is deleted, so there is no body to fetch.
+        let marker = versions
+            .first()
+            .filter(|v| v.is_delete && is_current(version));
+        let fetched = r
             .step("fetch body", |_| async {
-                Ok(s3.get_version(bucket, key, input.str("version")).await?)
+                match s3.get_version(bucket, key, version).await {
+                    Ok(object) => Ok(Fetched::Body(object)),
+                    Err(e) if e.is_not_found() => match marker {
+                        Some(marker) => Ok(Fetched::Deleted(marker)),
+                        None => Err(e.into()),
+                    },
+                    Err(e) => Err(e.into()),
+                }
             })
             .await?;
 
+        let (label, size, modified, etag, body) = match fetched {
+            Fetched::Body(object) => (
+                object.version_label(),
+                format!("{} B", object.meta.size),
+                object.meta.modified,
+                object.meta.etag.clone(),
+                body_preview(&object.body),
+            ),
+            Fetched::Deleted(marker) => (
+                format!("delete marker {}", short_id(&marker.id)),
+                "-".to_owned(),
+                marker.modified,
+                "-".to_owned(),
+                View::Doc {
+                    title: "Body".into(),
+                    body: "the current version is a delete marker; pass --version <id> to preview an earlier version".into(),
+                    lang: String::new(),
+                },
+            ),
+        };
         let summary = View::summary([
             ("Object", format!("{bucket}/{key}")),
-            ("Version", object.version_label()),
-            ("Size", format!("{} B", object.meta.size)),
-            (
-                "Modified",
-                timestamp(object.meta.modified, "%Y-%m-%d %H:%M:%S %Z"),
-            ),
-            ("ETag", object.meta.etag.clone()),
+            ("Version", label),
+            ("Size", size),
+            ("Modified", timestamp(modified, "%Y-%m-%d %H:%M:%S %Z")),
+            ("ETag", etag),
             ("Versions", versions.len().to_string()),
         ]);
         let history = View::Table {
@@ -80,9 +110,17 @@ impl Operation for ObjectInspect {
             rows: versions.iter().map(history_row).collect(),
         };
         Ok(OpResult {
-            views: vec![summary, history, body_preview(&object.body)],
+            views: vec![summary, history, body],
         })
     }
+}
+
+/// What the body fetch found.
+enum Fetched<'a> {
+    /// The requested version.
+    Body(Object),
+    /// No current body: this delete marker heads the history.
+    Deleted(&'a Version),
 }
 
 /// One row of the version history table.
@@ -140,7 +178,7 @@ mod tests {
     use super::*;
     use crate::ops::s3::fixture;
     use crate::ops::{Deps, Input, Runner};
-    use crate::svc::s3::FakeS3;
+    use crate::svc::s3::{FakeS3, S3Port};
 
     const KEY: &str = "tenants/acme.json";
     const V1: &str = r#"{"tier":"gold","rules":[{"id":"r1","limit":10}],"updatedAt":"2026-07-01"}"#;
@@ -297,6 +335,71 @@ mod tests {
         };
         let kinds: Vec<_> = rows.iter().map(|row| row[3].as_str()).collect();
         assert_eq!(kinds, ["latest", "delete marker", ""]);
+    }
+
+    #[tokio::test]
+    async fn a_deleted_object_shows_its_marker_and_history() {
+        let s3 = FakeS3::new();
+        s3.put(fixture::BUCKET, "k", "one");
+        s3.put(fixture::BUCKET, "k", "two");
+        let marker = s3.delete(fixture::BUCKET, "k");
+        let history = s3
+            .list_versions(fixture::BUCKET, "k")
+            .await
+            .expect("history exists");
+        let views = run(fixture::deps(s3), "k").await;
+        assert_eq!(views.len(), 3);
+        assert_eq!(
+            views[0],
+            View::summary([
+                ("Object", format!("{}/k", fixture::BUCKET)),
+                ("Version", format!("delete marker {}", short_id(&marker))),
+                ("Size", "-".to_owned()),
+                (
+                    "Modified",
+                    timestamp(history[0].modified, "%Y-%m-%d %H:%M:%S %Z"),
+                ),
+                ("ETag", "-".to_owned()),
+                ("Versions", "3".to_owned()),
+            ])
+        );
+        let View::Table { rows, .. } = &views[1] else {
+            panic!("second view is a table");
+        };
+        assert_eq!(*rows, history.iter().map(history_row).collect::<Vec<_>>());
+        let kinds: Vec<_> = rows.iter().map(|row| row[3].as_str()).collect();
+        assert_eq!(kinds, ["delete marker", "", ""]);
+        assert_eq!(
+            views[2],
+            doc(
+                "Body",
+                "the current version is a delete marker; pass --version <id> to preview an earlier version",
+                ""
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicit_version_that_is_missing_still_fails() {
+        let s3 = FakeS3::new();
+        s3.put(fixture::BUCKET, "k", "one");
+        s3.delete(fixture::BUCKET, "k");
+        let failure = Runner::new(fixture::deps(s3))
+            .execute(
+                &ObjectInspect,
+                input(&[
+                    ("bucket", fixture::BUCKET),
+                    ("key", "k"),
+                    ("version", "nope"),
+                ]),
+            )
+            .await
+            .expect_err("an unknown version fails");
+        assert!(
+            format!("{:#}", failure.error).starts_with("fetch body: "),
+            "{:#}",
+            failure.error
+        );
     }
 
     #[tokio::test]

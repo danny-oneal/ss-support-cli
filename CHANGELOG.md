@@ -49,3 +49,5 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cancelled, so the error starts on its own line.
 - A failed audit-log write prints `warning: audit log: …` instead of being
   silently dropped; the exit code is unchanged.
+- `s3.object-inspect` on a deleted object shows the delete marker and the
+  full version history instead of failing.
