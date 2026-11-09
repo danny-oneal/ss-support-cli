@@ -11,9 +11,11 @@ use crate::svc::s3::{CURRENT, S3Port};
 #[cfg(test)]
 pub(crate) mod fixture;
 mod object_inspect;
+mod prefix_audit;
 mod version_diff;
 
 pub use object_inspect::ObjectInspect;
+pub use prefix_audit::PrefixAudit;
 pub use version_diff::VersionDiff;
 
 /// The S3 port of `deps`, or an error when the invocation has none.
