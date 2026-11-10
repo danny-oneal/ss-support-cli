@@ -89,10 +89,14 @@ credentials are still resolved first.
 
 ### Trying it against MinIO
 
+MinIO publishes no anonymously pullable image; build the server from source
+(needs Go 1.24 or newer):
+
 ```bash
-docker run -d --rm --name ss-minio -p 9000:9000 \
-  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-  minio/minio server /data
+go install github.com/minio/minio@RELEASE.2025-10-15T17-29-55Z
+mkdir -p /tmp/ss-minio
+MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
+  "$(go env GOPATH)/bin/minio" server /tmp/ss-minio --address 127.0.0.1:9000 &
 
 export AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin AWS_REGION=us-east-1
 
@@ -107,4 +111,4 @@ SS_REGION=us-east-1 SS_S3_ENDPOINT=http://127.0.0.1:9000 \
 ```
 
 `SS_S3_TEST_ENDPOINT=http://127.0.0.1:9000 make contract` runs the S3
-contract suite against the same container.
+contract suite against the same server.
