@@ -287,8 +287,10 @@ fn key_names(schema: &[aws_sdk_dynamodb::types::KeySchemaElement]) -> (String, O
     )
 }
 
-/// The SDK request for `q`, reading through `index` when one is named. Empty
-/// expression attribute names and values are left unset.
+/// The SDK request for `q`, reading through `index` when one is named. Base
+/// table queries are strongly consistent; DynamoDB does not allow that on an
+/// index, so index queries are eventually consistent. Empty expression
+/// attribute names and values are left unset.
 fn query_input(q: &QuerySpec, index: Option<&str>) -> Result<QueryInput, SvcError> {
     let names = (!q.names.is_empty()).then(|| {
         q.names
@@ -312,6 +314,7 @@ fn query_input(q: &QuerySpec, index: Option<&str>) -> Result<QueryInput, SvcErro
     QueryInput::builder()
         .table_name(&q.table)
         .set_index_name(index.map(str::to_owned))
+        .set_consistent_read(index.is_none().then_some(true))
         .key_condition_expression(&q.key_condition)
         .set_expression_attribute_names(names)
         .set_expression_attribute_values(values)
@@ -492,6 +495,7 @@ mod tests {
         let q = query_input(&spec, Some("TierIndex")).expect("input");
         assert_eq!(q.table_name(), Some("tenants"));
         assert_eq!(q.index_name(), Some("TierIndex"));
+        assert_eq!(q.consistent_read(), None);
         assert_eq!(q.scan_index_forward(), Some(false));
         assert_eq!(q.limit(), Some(2));
         assert_eq!(q.key_condition_expression(), Some("#pk = :pk"));
@@ -516,6 +520,7 @@ mod tests {
         )
         .expect("input");
         assert_eq!(plain.index_name(), None);
+        assert_eq!(plain.consistent_read(), Some(true));
         assert!(plain.expression_attribute_names().is_none());
         assert!(plain.expression_attribute_values().is_none());
     }

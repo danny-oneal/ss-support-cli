@@ -132,7 +132,10 @@ async fn gsi_consistency_reports_a_consistent_index() {
     )
     .await;
     assert_eq!(exit, Exit::Ok, "{err}");
-    assert!(out.contains("consistent"), "{out}");
+    assert!(
+        out.contains("consistent — projection matches the base item"),
+        "{out}"
+    );
     assert!(!out.contains("DRIFT"), "{out}");
 }
 
@@ -210,6 +213,11 @@ async fn a_malformed_key_exits_1() {
     .await;
     assert_eq!(exit, Exit::Failed);
     assert_eq!(err.lines().count(), 1, "{err}");
+    assert!(
+        err.starts_with("ss-support run ddb.item-compare: "),
+        "{err}"
+    );
+    assert!(err.contains("not name=value"), "{err}");
 }
 
 #[tokio::test]

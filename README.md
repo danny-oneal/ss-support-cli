@@ -116,8 +116,11 @@ contract suite against the same server.
 ## DynamoDB
 
 Three operations read from DynamoDB. All are read-only: they never put,
-update, or delete an item, and every read is a consistent read. Read-only
-operations are not written to the audit log.
+update, or delete an item. Item fetches and base-table queries (including the
+version listing in `ddb.item-history`) are strongly consistent reads; index
+(GSI) queries are eventually consistent, because DynamoDB does not support
+consistent reads on a GSI, and that lag is what `ddb.gsi-consistency` exposes.
+Read-only operations are not written to the audit log.
 
 ```bash
 # list an item's versions (V0 = latest) and diff two of them (default: V1 -> V0)
