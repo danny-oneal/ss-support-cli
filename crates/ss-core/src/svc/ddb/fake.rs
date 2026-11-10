@@ -183,7 +183,8 @@ impl State {
     }
 }
 
-/// An in-memory DynamoDB. Clones share the same data.
+/// An in-memory DynamoDB. Clones share the same data. `Include` projections
+/// behave like `KeysOnly` in the fake.
 #[derive(Debug, Clone, Default)]
 pub struct FakeDdb {
     state: Arc<Mutex<State>>,

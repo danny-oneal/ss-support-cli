@@ -15,17 +15,21 @@ use crate::ops::{
     Choice, Deps, Input, Meta, OpResult, Operation, Param, ParamType, Runner, SuggestFn, View,
 };
 use crate::svc::SvcError;
-use crate::svc::ddb::{DdbPort, Item, QuerySpec, TableInfo};
+use crate::svc::ddb::{AttrType, DdbPort, Item, QuerySpec, TableInfo};
 
 /// The attribute holding an item's version label unless `version-attr` says
 /// otherwise.
 pub(crate) const DEFAULT_VERSION_ATTR: &str = "Version";
 
-/// The number of versions fetched when `limit` is missing or not positive.
+/// The number of versions shown when `limit` is missing or not positive.
 const DEFAULT_LIMIT: usize = 50;
 
-/// The most versions one run fetches.
+/// The most versions one run shows, and the hard bound on how many it reads
+/// so a hot partition never loops without end.
 const MAX_LIMIT: usize = 10_000;
+
+/// The items requested per call; the page size never changes the result.
+const PAGE_SIZE: i32 = 100;
 
 /// The widest item preview in the version table, in characters.
 const PREVIEW_WIDTH: usize = 80;
@@ -35,7 +39,7 @@ const PREVIEW_WIDTH: usize = 80;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ItemHistory;
 
-/// The fetch limit for a raw `limit` value: positive values are capped at
+/// The row limit for a raw `limit` value: positive values are capped at
 /// [`MAX_LIMIT`], anything else falls back to [`DEFAULT_LIMIT`].
 fn clamp_limit(raw: i64) -> usize {
     usize::try_from(raw)
@@ -52,27 +56,35 @@ fn or_default<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     }
 }
 
-/// Up to `limit` items of `table` under the partition key `pk`, in version
-/// order. Pages are drained until the service reports no more or `limit`
-/// items are held, so the page size never changes the result.
+/// Every version of `table` under the partition key `pk` (at most
+/// [`MAX_LIMIT`]), in version order. Pages are drained until the service
+/// reports no more or the bound is reached, so the page size never changes
+/// the result and no version is dropped before the sort.
+///
+/// # Errors
+///
+/// Fails when the partition key is binary, or when a query fails.
 async fn query_versions(
     ddb: &dyn DdbPort,
     info: &TableInfo,
     table: &str,
     pk: &str,
     version_attr: &str,
-    limit: usize,
 ) -> Result<Vec<Item>, SvcError> {
-    let pk_value = coerce(
-        Value::String(pk.to_owned()),
-        info.attr_types.get(&info.hash_key).copied(),
-    );
+    let attr_type = info.attr_types.get(&info.hash_key).copied();
+    if attr_type == Some(AttrType::B) {
+        return Err(SvcError::Other(anyhow::anyhow!(
+            "binary key attributes are not supported: {}",
+            info.hash_key
+        )));
+    }
+    let pk_value = coerce(Value::String(pk.to_owned()), attr_type);
     let mut spec = QuerySpec {
         table: table.to_owned(),
         key_condition: "#pk = :pk".to_owned(),
         names: [("#pk".to_owned(), info.hash_key.clone())].into(),
         values: [(":pk".to_owned(), pk_value)].into(),
-        limit: i32::try_from(limit).ok(),
+        limit: Some(PAGE_SIZE),
         ..QuerySpec::default()
     };
     let mut items = Vec::new();
@@ -80,11 +92,11 @@ async fn query_versions(
         let page = ddb.query(&spec).await?;
         items.extend(page.items);
         match page.next {
-            Some(next) if items.len() < limit => spec.exclusive_start = Some(next),
+            Some(next) if items.len() < MAX_LIMIT => spec.exclusive_start = Some(next),
             _ => break,
         }
     }
-    items.truncate(limit);
+    items.truncate(MAX_LIMIT);
     sort_by_version(&mut items, version_attr);
     Ok(items)
 }
@@ -103,9 +115,10 @@ pub(crate) fn suggest_item_versions() -> SuggestFn {
             };
             let attr = or_default(input.str("version-attr"), DEFAULT_VERSION_ATTR);
             let info = ddb.describe_table(table).await?;
-            let items = query_versions(&*ddb, &info, table, pk, attr, DEFAULT_LIMIT).await?;
+            let items = query_versions(&*ddb, &info, table, pk, attr).await?;
             Ok(items
                 .iter()
+                .take(DEFAULT_LIMIT)
                 .map(|item| item_version(item, attr))
                 .filter(|label| !label.is_empty())
                 .map(|label| {
@@ -178,7 +191,7 @@ impl Operation for ItemHistory {
         let (info, items) = r
             .step("query versions", |_| async {
                 let info = ddb.describe_table(table).await?;
-                let items = query_versions(&*ddb, &info, table, pk, version_attr, limit).await?;
+                let items = query_versions(&*ddb, &info, table, pk, version_attr).await?;
                 Ok((info, items))
             })
             .await?;
@@ -193,6 +206,7 @@ impl Operation for ItemHistory {
             .collect();
         let rows: Vec<Vec<String>> = items
             .iter()
+            .take(limit)
             .map(|item| {
                 let label = item_version(item, version_attr);
                 let latest = version_num(&label) == Some(0);
@@ -208,6 +222,12 @@ impl Operation for ItemHistory {
             ("Item".to_owned(), format!("{table} {}={pk}", info.hash_key)),
             ("Versions".to_owned(), items.len().to_string()),
         ];
+        if items.len() > limit {
+            summary.push((
+                "Note".to_owned(),
+                format!("showing the first {limit} of {} versions", items.len()),
+            ));
+        }
         let mut diff_view = None;
         if items.len() < 2 {
             summary.push((
@@ -226,6 +246,7 @@ impl Operation for ItemHistory {
                     let missing = if found_a.is_none() { label_a } else { label_b };
                     let have: Vec<String> = items
                         .iter()
+                        .take(limit)
                         .map(|i| item_version(i, version_attr))
                         .filter(|l| !l.is_empty())
                         .collect();
@@ -477,9 +498,55 @@ mod tests {
         )
         .await;
         let table = rows(&views[1]);
-        assert_eq!(table.len(), 4);
-        assert_eq!(table[0][0], "V0");
+        let labels: Vec<&str> = table.iter().map(|r| r[0].as_str()).collect();
+        assert_eq!(labels, ["V0", "V1", "V2", "V3"]);
         assert_eq!(table[0][1], "latest");
+    }
+
+    #[tokio::test]
+    async fn a_requested_version_beyond_the_displayed_rows_is_still_found() {
+        // Sorted by sort key the first fifty of a hundred versions are
+        // V0, V1, V10..V19, V2, ..., so V7 would be cut off.
+        let views = run(
+            paged_deps(100, 7),
+            &[
+                ("table", "tenants"),
+                ("pk", "acme"),
+                ("a", "V7"),
+                ("b", "V0"),
+            ],
+        )
+        .await;
+        let table = rows(&views[1]);
+        assert_eq!(table.len(), 50);
+        assert_eq!(table[49][0], "V49");
+        let View::Summary { fields } = &views[0] else {
+            panic!("first view is a summary");
+        };
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "Diff" && v.starts_with("V7 → V0:")),
+            "{fields:?}"
+        );
+        assert_eq!(paths(&views[2]), ["limits.rps"]);
+    }
+
+    #[tokio::test]
+    async fn draining_stops_at_the_hard_bound() {
+        let views = run(
+            paged_deps(MAX_LIMIT + 50, 1000),
+            &[("table", "tenants"), ("pk", "acme"), ("limit", "10")],
+        )
+        .await;
+        let View::Summary { fields } = &views[0] else {
+            panic!("first view is a summary");
+        };
+        assert!(
+            fields.iter().any(|(k, v)| k == "Versions" && v == "10000"),
+            "{fields:?}"
+        );
+        assert_eq!(rows(&views[1]).len(), 10);
     }
 
     #[test]
@@ -577,6 +644,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_binary_partition_key_is_refused() {
+        let ddb = FakeDdb::new();
+        ddb.create_table(TableInfo {
+            name: "blobs".into(),
+            hash_key: "Id".into(),
+            sort_key: Some("Version".into()),
+            attr_types: [
+                ("Id".to_owned(), AttrType::B),
+                ("Version".to_owned(), AttrType::S),
+            ]
+            .into(),
+            gsis: Vec::new(),
+        });
+        let err = try_run(fixture::deps(ddb), &[("table", "blobs"), ("pk", "abc")])
+            .await
+            .expect_err("binary key");
+        assert!(
+            format!("{err:#}").contains("binary key attributes are not supported: Id"),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn without_ddb_the_run_fails_clearly() {
         let err = try_run(Deps::default(), &[("table", "tenants"), ("pk", "acme")])
             .await
@@ -591,6 +681,15 @@ mod tests {
         suggest_item_versions()(d.clone(), input(pairs))
             .await
             .expect("suggestions")
+    }
+
+    #[tokio::test]
+    async fn version_suggestions_are_the_first_versions_after_sorting() {
+        let d = paged_deps(100, 7);
+        let choices = suggest(&d, &[("table", "tenants"), ("pk", "acme")]).await;
+        let values: Vec<String> = choices.into_iter().map(|c| c.value).collect();
+        let want: Vec<String> = (0..DEFAULT_LIMIT).map(|i| format!("V{i}")).collect();
+        assert_eq!(values, want);
     }
 
     #[tokio::test]

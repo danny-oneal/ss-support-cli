@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, anyhow, bail};
 use serde_json::{Number, Value};
 
-use super::{Choice, Deps, Input, SuggestFn};
+use super::{Choice, Deps, Input, RunnerError, SuggestFn};
 use crate::jsonutil;
 use crate::svc::ddb::{AttrType, DdbPort, Item, Key, TableInfo};
 
@@ -82,19 +82,46 @@ pub(crate) fn suggest_indexes() -> SuggestFn {
     })
 }
 
+/// The key attribute names of `info`: the hash key, then the sort key.
+fn key_attribute_names(info: &TableInfo) -> Vec<&str> {
+    std::iter::once(info.hash_key.as_str())
+        .chain(info.sort_key.as_deref())
+        .collect()
+}
+
+/// Refuses a table whose key has a binary attribute, which keys cannot carry
+/// as text.
+///
+/// # Errors
+///
+/// Returns an error naming the first binary key attribute.
+pub(crate) fn refuse_binary_key(info: &TableInfo) -> anyhow::Result<()> {
+    match key_attribute_names(info)
+        .into_iter()
+        .find(|name| info.attr_types.get(*name) == Some(&AttrType::B))
+    {
+        Some(name) => bail!("binary key attributes are not supported: {name}"),
+        None => Ok(()),
+    }
+}
+
 /// Parses a key given as a JSON object or as `name=value` pairs separated by
 /// commas, converting each value to the type `info` declares for its
-/// attribute. Pairs split on the first `=` and trim both sides.
+/// attribute. Pairs split on the first `=` and trim both sides. The key holds
+/// exactly the table's hash key and, when it has one, its sort key.
 ///
 /// # Errors
 ///
 /// Returns an error when `spec` is blank, is not valid JSON though it starts
-/// with `{`, or has a part that is not `name=value`.
+/// with `{`, has a part that is not `name=value`, names attributes other than
+/// the table's key attributes or omits some of them, or the table has a
+/// binary key attribute.
 pub(crate) fn parse_key(spec: &str, info: &TableInfo) -> anyhow::Result<Key> {
     let spec = spec.trim();
     if spec.is_empty() {
         bail!("empty key");
     }
+    refuse_binary_key(info)?;
     let mut key = if spec.starts_with('{') {
         let value = jsonutil::parse(spec.as_bytes()).context("key is not valid JSON")?;
         let Value::Object(map) = value else {
@@ -113,11 +140,54 @@ pub(crate) fn parse_key(spec: &str, info: &TableInfo) -> anyhow::Result<Key> {
         }
         map
     };
+    let expected = key_attribute_names(info);
+    let missing: Vec<&str> = expected
+        .iter()
+        .copied()
+        .filter(|name| !key.contains_key(*name))
+        .collect();
+    let unexpected: Vec<&str> = key
+        .keys()
+        .map(String::as_str)
+        .filter(|name| !expected.contains(name))
+        .collect();
+    if !missing.is_empty() || !unexpected.is_empty() {
+        let mut problems = Vec::new();
+        if !missing.is_empty() {
+            problems.push(format!("missing {}", missing.join(", ")));
+        }
+        if !unexpected.is_empty() {
+            problems.push(format!("unexpected {}", unexpected.join(", ")));
+        }
+        bail!(
+            "key must contain exactly {}; {}",
+            expected.join(", "),
+            problems.join("; ")
+        );
+    }
     for (name, value) in &mut key {
         let attr_type = info.attr_types.get(name).copied();
         *value = coerce(std::mem::take(value), attr_type);
     }
     Ok(key)
+}
+
+/// [`parse_key`] for the operation parameter `param`: a key that cannot be
+/// used is a usage error naming the parameter and the value as given.
+///
+/// # Errors
+///
+/// Returns [`RunnerError::InvalidParam`] wrapping the [`parse_key`] error.
+pub(crate) fn parse_key_param(
+    param: &str,
+    spec: &str,
+    info: &TableInfo,
+) -> Result<Key, RunnerError> {
+    parse_key(spec, info).map_err(|e| RunnerError::InvalidParam {
+        param: param.to_owned(),
+        value: spec.to_owned(),
+        source: e.into(),
+    })
 }
 
 /// Converts `val` to the declared attribute type: a numeric string becomes a
@@ -304,7 +374,11 @@ mod tests {
 
     #[test]
     fn parse_key_splits_on_the_first_equals_only() -> anyhow::Result<()> {
-        let key = parse_key("Name=a=b", &TableInfo::default())?;
+        let info = TableInfo {
+            hash_key: "Name".into(),
+            ..TableInfo::default()
+        };
+        let key = parse_key("Name=a=b", &info)?;
         assert_eq!(key, item(json!({"Name": "a=b"})));
         Ok(())
     }
@@ -329,6 +403,60 @@ mod tests {
         );
         assert!(parse_key("[1]", &info).is_err());
         assert!(parse_key("=x", &info).is_err());
+    }
+
+    #[test]
+    fn parse_key_requires_exactly_the_table_key() {
+        let info = tenants_info();
+        let err = parse_key("TenantId=acme", &info).expect_err("sort key missing");
+        assert_eq!(
+            err.to_string(),
+            "key must contain exactly TenantId, Version; missing Version"
+        );
+        let err = parse_key("tenantId=acme,Version=V0", &info).expect_err("wrong case");
+        assert_eq!(
+            err.to_string(),
+            "key must contain exactly TenantId, Version; missing TenantId; unexpected tenantId"
+        );
+        let err = parse_key("TenantId=acme,Version=V0,Tier=gold", &info).expect_err("extra");
+        assert_eq!(
+            err.to_string(),
+            "key must contain exactly TenantId, Version; unexpected Tier"
+        );
+        let err = parse_key("{}", &info).expect_err("empty object");
+        assert_eq!(
+            err.to_string(),
+            "key must contain exactly TenantId, Version; missing TenantId, Version"
+        );
+        let hash_only = TableInfo {
+            hash_key: "Id".into(),
+            ..TableInfo::default()
+        };
+        assert!(parse_key("Id=1", &hash_only).is_ok());
+        let err = parse_key("Id=1,Sort=2", &hash_only).expect_err("no sort key");
+        assert_eq!(
+            err.to_string(),
+            "key must contain exactly Id; unexpected Sort"
+        );
+    }
+
+    #[test]
+    fn parse_key_refuses_binary_key_attributes() {
+        let info = TableInfo {
+            hash_key: "Id".into(),
+            sort_key: Some("Sort".into()),
+            attr_types: [
+                ("Id".to_owned(), AttrType::B),
+                ("Sort".to_owned(), AttrType::S),
+            ]
+            .into(),
+            ..TableInfo::default()
+        };
+        let err = parse_key("Id=abc,Sort=x", &info).expect_err("binary key");
+        assert_eq!(
+            err.to_string(),
+            "binary key attributes are not supported: Id"
+        );
     }
 
     #[test]

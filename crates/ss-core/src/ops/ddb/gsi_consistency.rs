@@ -4,12 +4,12 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use super::{parse_key, port, suggest_indexes, suggest_tables};
+use super::{parse_key_param, port, suggest_indexes, suggest_tables};
 use crate::diff::{self, Opts};
 use crate::guard::Class;
 use crate::ops::{Input, Meta, OpResult, Operation, Param, Runner, View};
 use crate::svc::SvcError;
-use crate::svc::ddb::{DdbPort, IndexInfo, Item, QuerySpec, TableInfo, key_string};
+use crate::svc::ddb::{DdbPort, IndexInfo, Item, Projection, QuerySpec, TableInfo, key_string};
 
 /// The most index entries one run reads under the item's index hash value
 /// before it gives up with an inconclusive answer.
@@ -28,7 +28,8 @@ enum Scan {
     /// The index holds this many entries under the hash value, none of them
     /// the item's.
     Missing(usize),
-    /// [`MAX_CANDIDATES`] entries were read without finding the item's.
+    /// [`MAX_CANDIDATES`] entries were read without finding the item's, and
+    /// more remain unread.
     Capped,
 }
 
@@ -44,7 +45,8 @@ fn base_key_string(info: &TableInfo, item: &Item) -> String {
 
 /// Reads `index` of `table` under `hash_value` page by page until the entry
 /// whose base key renders as `target` turns up, the partition ends, or
-/// [`MAX_CANDIDATES`] entries have been read.
+/// [`MAX_CANDIDATES`] entries have been read with more still to come. A
+/// partition of exactly [`MAX_CANDIDATES`] entries is read in full.
 async fn find_entry(
     ddb: &dyn DdbPort,
     info: &TableInfo,
@@ -61,18 +63,56 @@ async fn find_entry(
     let mut seen = 0usize;
     loop {
         let page = ddb.query_index(&info.name, &index.name, &spec).await?;
-        for entry in page.items {
+        let mut entries = page.items.into_iter();
+        while let Some(entry) = entries.next() {
             seen += 1;
             if base_key_string(info, &entry) == target {
                 return Ok(Scan::Found(entry));
             }
             if seen >= MAX_CANDIDATES {
-                return Ok(Scan::Capped);
+                // Capped only when something is left to read.
+                return Ok(if !entries.as_slice().is_empty() || page.next.is_some() {
+                    Scan::Capped
+                } else {
+                    Scan::Missing(seen)
+                });
             }
         }
         match page.next {
             Some(next) => spec.exclusive_start = Some(next),
             None => return Ok(Scan::Missing(seen)),
+        }
+    }
+}
+
+/// `item` cut down to the attributes named in `names`.
+fn restrict(item: Item, names: &[&str]) -> Item {
+    item.into_iter()
+        .filter(|(name, _)| names.contains(&name.as_str()))
+        .collect()
+}
+
+/// The base item and index entry cut down to what the index is expected to
+/// carry, so the two can be diffed. An `ALL` index carries the whole item; a
+/// `KEYS_ONLY` index carries the table and index key attributes; for any
+/// other projection only the attributes the entry has are compared.
+fn comparable(info: &TableInfo, index: &IndexInfo, base: Item, entry: Item) -> (Item, Item) {
+    match index.projection {
+        Some(Projection::All) => (base, entry),
+        Some(Projection::KeysOnly) => {
+            let names: Vec<&str> = std::iter::once(info.hash_key.as_str())
+                .chain(info.sort_key.as_deref())
+                .chain(std::iter::once(index.hash_key.as_str()))
+                .chain(index.sort_key.as_deref())
+                .collect();
+            (restrict(base, &names), restrict(entry, &names))
+        }
+        Some(Projection::Include) | None => {
+            let projected = base
+                .into_iter()
+                .filter(|(name, _)| entry.contains_key(name))
+                .collect();
+            (projected, entry)
         }
     }
 }
@@ -125,7 +165,7 @@ impl Operation for GsiConsistency {
         let Some(index) = info.index(index_name) else {
             anyhow::bail!("table {table} has no GSI {index_name:?}");
         };
-        let key = parse_key(input.str("key"), &info).map_err(|e| e.context("key"))?;
+        let key = parse_key_param("key", input.str("key"), &info)?;
 
         let base = r
             .step("fetch base item", |_| async {
@@ -186,11 +226,7 @@ impl Operation for GsiConsistency {
             }
         };
 
-        let projected: Item = base
-            .iter()
-            .filter(|(name, _)| entry.contains_key(*name))
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect();
+        let (projected, entry) = comparable(&info, index, base, entry);
         let opts = Opts {
             ignore: r.deps.diff.ignore.clone(),
             array_match: r.deps.diff.array_match.clone(),
@@ -231,7 +267,7 @@ impl Operation for GsiConsistency {
 mod tests {
     use super::*;
     use crate::ops::ddb::fixture;
-    use crate::ops::{Deps, Input, RunFailure, Runner, View, find_cause};
+    use crate::ops::{Deps, FailureKind, Input, RunFailure, Runner, RunnerError, View, find_cause};
     use crate::svc::SvcError;
     use crate::svc::ddb::{AttrType, FakeDdb, IndexInfo, Item, Projection, TableInfo, contract};
     use serde_json::{Value, json};
@@ -440,11 +476,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_malformed_key_fails_before_any_fetch() {
+    async fn a_malformed_key_is_a_usage_error_before_any_fetch() {
         let f = fail(fixture::deps(fixture::fake()), &args("nonsense")).await;
+        assert_eq!(f.kind, FailureKind::Usage);
+        assert!(matches!(
+            find_cause::<RunnerError>(&f.error),
+            Some(RunnerError::InvalidParam { param, value, .. })
+                if param == "key" && value == "nonsense"
+        ));
         let text = format!("{:#}", f.error);
         assert!(text.contains("is not name=value"), "{text}");
         assert!(!text.contains("fetch base item"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_key_of_the_wrong_shape_is_a_usage_error() {
+        let f = fail(fixture::deps(fixture::fake()), &args("TenantId=acme")).await;
+        assert_eq!(f.kind, FailureKind::Usage);
+        let text = format!("{:#}", f.error);
+        assert!(
+            text.contains("key must contain exactly TenantId, Version; missing Version"),
+            "{text}"
+        );
     }
 
     #[tokio::test]
@@ -508,6 +561,33 @@ mod tests {
 
     #[tokio::test]
     async fn scan_stops_after_the_candidate_cap() {
+        // The target's entry is ordered last; an unbounded scan would find it
+        // and answer `consistent`.
+        let extra = 500;
+        let ddb = FakeDdb::new();
+        ddb.create_table(contract::table_info("hot"));
+        for n in 0..MAX_CANDIDATES + extra {
+            ddb.put(
+                "hot",
+                obj(json!({"TenantId": format!("t{n:05}"), "Version": "V0", "Tier": "gold"})),
+            );
+        }
+        let key = format!("TenantId=t{:05},Version=V0", MAX_CANDIDATES + extra - 1);
+        let views = run(
+            ddb.paged(1000),
+            &[("table", "hot"), ("index", "TierIndex"), ("key", &key)],
+        )
+        .await;
+        assert_eq!(views.len(), 1);
+        assert_eq!(
+            result(&views[0]),
+            "INCONCLUSIVE — no matching GSI entry among the first 10000 candidates \
+             under Tier=gold; the entry may exist further on"
+        );
+    }
+
+    #[tokio::test]
+    async fn exactly_the_cap_of_entries_without_a_match_is_missing_not_inconclusive() {
         let ddb = FakeDdb::new();
         ddb.create_table(contract::table_info("hot"));
         for n in 0..=MAX_CANDIDATES {
@@ -522,17 +602,48 @@ mod tests {
             &obj(json!({"TenantId": format!("t{MAX_CANDIDATES:05}"), "Version": "V0"})),
         );
         let key = format!("TenantId=t{MAX_CANDIDATES:05},Version=V0");
-        let views = run(
-            ddb.paged(1000),
-            &[("table", "hot"), ("index", "TierIndex"), ("key", &key)],
-        )
-        .await;
-        assert_eq!(views.len(), 1);
-        assert_eq!(
-            result(&views[0]),
-            "INCONCLUSIVE — no matching GSI entry among the first 10000 candidates \
-             under Tier=gold; the entry may exist further on"
+        for page in [1000, MAX_CANDIDATES, 100_000] {
+            let views = run(
+                ddb.paged(page),
+                &[("table", "hot"), ("index", "TierIndex"), ("key", &key)],
+            )
+            .await;
+            assert_eq!(
+                result(&views[0]),
+                "MISSING — no GSI entry matches the base key (10000 candidates under Tier=gold)",
+                "page {page}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_all_projection_notices_an_attribute_the_entry_never_received() {
+        let ddb = fixture::fake();
+        let mut stale = obj(json!({
+            "TenantId": "beta", "Version": "V0", "Tier": "bronze",
+            "limits": {"rps": 10}, "updatedAt": "2026-07-V0",
+        }));
+        ddb.put(
+            "tenants",
+            obj(json!({
+                "TenantId": "beta", "Version": "V0", "Tier": "bronze",
+                "limits": {"rps": 10}, "updatedAt": "2026-07-V0", "region": "us-east-1",
+            })),
         );
+        stale.remove("region");
+        ddb.set_index_entry("tenants", "TierIndex", stale);
+        let views = run(ddb, &args("TenantId=beta,Version=V0")).await;
+        assert_eq!(views.len(), 2);
+        assert!(
+            result(&views[0]).starts_with("DRIFT"),
+            "{:?}",
+            fields(&views[0])
+        );
+        let View::Diff { delta, .. } = &views[1] else {
+            panic!("second view is a diff");
+        };
+        let paths: Vec<String> = delta.changes.iter().map(|c| c.path.dotted()).collect();
+        assert_eq!(paths, ["region"]);
     }
 
     #[tokio::test]

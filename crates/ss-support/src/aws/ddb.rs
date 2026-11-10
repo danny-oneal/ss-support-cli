@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use aws_config::SdkConfig;
 use aws_sdk_dynamodb::config::http::HttpResponse;
 use aws_sdk_dynamodb::error::{ProvideErrorMetadata, SdkError};
-use aws_sdk_dynamodb::operation::query::QueryInput;
+use aws_sdk_dynamodb::operation::query::builders::QueryFluentBuilder;
 use aws_sdk_dynamodb::primitives::Blob;
 use aws_sdk_dynamodb::types::{
     AttributeValue, KeyType, ProjectionType, ScalarAttributeType, TableDescription,
@@ -50,23 +50,60 @@ impl AwsDdb {
         }
     }
 
-    /// Runs one `Query` call for `input` and shapes the response.
-    async fn run_query(&self, input: &QueryInput) -> Result<ItemPage, SvcError> {
-        let what = input.table_name().unwrap_or_default().to_owned();
-        let out = self
+    /// The `Query` request for `q`, reading through `index` when one is named,
+    /// exactly as it will be sent. Base-table queries are strongly consistent;
+    /// DynamoDB does not allow that on an index, so index queries are
+    /// eventually consistent. Empty expression attribute names and values are
+    /// left unset.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a value or the exclusive start key cannot be encoded.
+    fn query_builder(
+        &self,
+        q: &QuerySpec,
+        index: Option<&str>,
+    ) -> Result<QueryFluentBuilder, SvcError> {
+        let names = (!q.names.is_empty()).then(|| {
+            q.names
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<HashMap<_, _>>()
+        });
+        let values = if q.values.is_empty() {
+            None
+        } else {
+            let mut out = HashMap::with_capacity(q.values.len());
+            for (name, value) in &q.values {
+                let av: AttributeValue = serde_dynamo::to_attribute_value(value).map_err(|e| {
+                    SvcError::Other(anyhow::Error::from(e).context(format!("encode value {name}")))
+                })?;
+                out.insert(name.clone(), av);
+            }
+            Some(out)
+        };
+        let start = q.exclusive_start.as_ref().map(key_to_av).transpose()?;
+        Ok(self
             .client
             .query()
-            .set_table_name(input.table_name().map(str::to_owned))
-            .set_index_name(input.index_name().map(str::to_owned))
-            .set_key_condition_expression(input.key_condition_expression().map(str::to_owned))
-            .set_expression_attribute_names(input.expression_attribute_names().cloned())
-            .set_expression_attribute_values(input.expression_attribute_values().cloned())
-            .set_exclusive_start_key(input.exclusive_start_key().cloned())
-            .set_limit(input.limit())
-            .set_scan_index_forward(input.scan_index_forward())
+            .table_name(&q.table)
+            .set_index_name(index.map(str::to_owned))
+            .set_consistent_read(index.is_none().then_some(true))
+            .key_condition_expression(&q.key_condition)
+            .set_expression_attribute_names(names)
+            .set_expression_attribute_values(values)
+            .set_exclusive_start_key(start)
+            .set_limit(q.limit)
+            .scan_index_forward(!q.descending))
+    }
+
+    /// Runs one `Query` call for `q` and shapes the response.
+    async fn run_query(&self, q: &QuerySpec, index: Option<&str>) -> Result<ItemPage, SvcError> {
+        let out = self
+            .query_builder(q, index)?
             .send()
             .await
-            .map_err(|e| svc_error(&what, e))?;
+            .map_err(|e| svc_error(&q.table, e))?;
         let items = out
             .items()
             .iter()
@@ -135,7 +172,7 @@ impl DdbPort for AwsDdb {
     }
 
     async fn query(&self, q: &QuerySpec) -> Result<ItemPage, SvcError> {
-        self.run_query(&query_input(q, None)?).await
+        self.run_query(q, None).await
     }
 
     async fn query_index(
@@ -148,7 +185,7 @@ impl DdbPort for AwsDdb {
             table: table.to_owned(),
             ..q.clone()
         };
-        self.run_query(&query_input(&spec, Some(index))?).await
+        self.run_query(&spec, Some(index)).await
     }
 }
 
@@ -287,44 +324,6 @@ fn key_names(schema: &[aws_sdk_dynamodb::types::KeySchemaElement]) -> (String, O
     )
 }
 
-/// The SDK request for `q`, reading through `index` when one is named. Base
-/// table queries are strongly consistent; DynamoDB does not allow that on an
-/// index, so index queries are eventually consistent. Empty expression
-/// attribute names and values are left unset.
-fn query_input(q: &QuerySpec, index: Option<&str>) -> Result<QueryInput, SvcError> {
-    let names = (!q.names.is_empty()).then(|| {
-        q.names
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<HashMap<_, _>>()
-    });
-    let values = if q.values.is_empty() {
-        None
-    } else {
-        let mut out = HashMap::with_capacity(q.values.len());
-        for (name, value) in &q.values {
-            let av: AttributeValue = serde_dynamo::to_attribute_value(value).map_err(|e| {
-                SvcError::Other(anyhow::Error::from(e).context(format!("encode value {name}")))
-            })?;
-            out.insert(name.clone(), av);
-        }
-        Some(out)
-    };
-    let start = q.exclusive_start.as_ref().map(key_to_av).transpose()?;
-    QueryInput::builder()
-        .table_name(&q.table)
-        .set_index_name(index.map(str::to_owned))
-        .set_consistent_read(index.is_none().then_some(true))
-        .key_condition_expression(&q.key_condition)
-        .set_expression_attribute_names(names)
-        .set_expression_attribute_values(values)
-        .set_exclusive_start_key(start)
-        .set_limit(q.limit)
-        .scan_index_forward(!q.descending)
-        .build()
-        .map_err(|e| SvcError::Other(anyhow::Error::from(e).context("build query")))
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -335,12 +334,22 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("split yields at least one part");
+        assert!(
+            production.contains("impl DdbPort for AwsDdb"),
+            "the production half of the adapter must hold the port implementation"
+        );
         let needles = [
             concat!("put", "_item"),
             concat!("update", "_item"),
             concat!("delete", "_item"),
             concat!("batch", "_write"),
             concat!("transact", "_write"),
+            concat!("execute", "_statement"),
+            concat!("batch_execute", "_statement"),
+            concat!("execute", "_transaction"),
+            concat!("create", "_table"),
+            concat!("update", "_table"),
+            concat!("delete", "_table"),
         ];
         for needle in needles {
             assert!(
@@ -481,9 +490,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn query_input_maps_the_spec() {
-        let spec = QuerySpec {
+    /// An adapter whose client is configured but never connects.
+    fn offline_port() -> AwsDdb {
+        let cfg = aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new("us-east-1"))
+            .build();
+        AwsDdb::new(&cfg, Options::default())
+    }
+
+    fn tenants_spec() -> QuerySpec {
+        QuerySpec {
             table: "tenants".into(),
             key_condition: "#pk = :pk".into(),
             names: [("#pk".to_owned(), "TenantId".to_owned())].into(),
@@ -491,38 +508,62 @@ mod tests {
             limit: Some(2),
             descending: true,
             exclusive_start: Some(obj(json!({"TenantId": "acme", "Version": "V1"}))),
-        };
-        let q = query_input(&spec, Some("TierIndex")).expect("input");
-        assert_eq!(q.table_name(), Some("tenants"));
-        assert_eq!(q.index_name(), Some("TierIndex"));
-        assert_eq!(q.consistent_read(), None);
-        assert_eq!(q.scan_index_forward(), Some(false));
-        assert_eq!(q.limit(), Some(2));
-        assert_eq!(q.key_condition_expression(), Some("#pk = :pk"));
+        }
+    }
+
+    #[test]
+    fn an_index_query_is_sent_eventually_consistent_with_every_mapped_field() {
+        let port = offline_port();
+        let sent = port
+            .query_builder(&tenants_spec(), Some("TierIndex"))
+            .expect("request");
+        let q = sent.as_input();
+        assert_eq!(q.get_table_name().as_deref(), Some("tenants"));
+        assert_eq!(q.get_index_name().as_deref(), Some("TierIndex"));
+        assert_eq!(q.get_consistent_read(), &None);
+        assert_eq!(q.get_scan_index_forward(), &Some(false));
+        assert_eq!(q.get_limit(), &Some(2));
         assert_eq!(
-            q.expression_attribute_names().and_then(|m| m.get("#pk")),
+            q.get_key_condition_expression().as_deref(),
+            Some("#pk = :pk")
+        );
+        assert_eq!(
+            q.get_expression_attribute_names()
+                .as_ref()
+                .and_then(|m| m.get("#pk")),
             Some(&"TenantId".to_owned())
         );
         assert_eq!(
-            q.expression_attribute_values().and_then(|m| m.get(":pk")),
+            q.get_expression_attribute_values()
+                .as_ref()
+                .and_then(|m| m.get(":pk")),
             Some(&AttributeValue::S("acme".into()))
         );
-        let start = q.exclusive_start_key().expect("start key");
+        let start = q.get_exclusive_start_key().as_ref().expect("start key");
         assert_eq!(start["Version"], AttributeValue::S("V1".into()));
+    }
 
-        let plain = query_input(
-            &QuerySpec {
-                names: Default::default(),
-                values: Default::default(),
-                ..spec
-            },
-            None,
-        )
-        .expect("input");
-        assert_eq!(plain.index_name(), None);
-        assert_eq!(plain.consistent_read(), Some(true));
-        assert!(plain.expression_attribute_names().is_none());
-        assert!(plain.expression_attribute_values().is_none());
+    #[test]
+    fn a_base_table_query_is_sent_strongly_consistent_without_empty_expressions() {
+        let port = offline_port();
+        let spec = QuerySpec {
+            names: Default::default(),
+            values: Default::default(),
+            exclusive_start: None,
+            descending: false,
+            limit: None,
+            ..tenants_spec()
+        };
+        let sent = port.query_builder(&spec, None).expect("request");
+        let q = sent.as_input();
+        assert_eq!(q.get_table_name().as_deref(), Some("tenants"));
+        assert_eq!(q.get_index_name(), &None);
+        assert_eq!(q.get_consistent_read(), &Some(true));
+        assert_eq!(q.get_scan_index_forward(), &Some(true));
+        assert_eq!(q.get_limit(), &None);
+        assert!(q.get_expression_attribute_names().is_none());
+        assert!(q.get_expression_attribute_values().is_none());
+        assert!(q.get_exclusive_start_key().is_none());
     }
 
     #[test]
@@ -588,7 +629,7 @@ mod dynalite {
     };
     use serde_json::{Value, json};
     use ss_core::svc::ddb::contract;
-    use ss_core::svc::ddb::{AttrType, DdbPort, Item, Key};
+    use ss_core::svc::ddb::{AttrType, DdbPort, Item};
 
     use super::{AwsDdb, Options};
 
@@ -799,7 +840,6 @@ mod dynalite {
         let Value::Object(key) = json!({"Id": 42.0}) else {
             unreachable!("a JSON object literal is an object")
         };
-        let key: Key = key;
         let found = port
             .get_item(&table, &key)
             .await

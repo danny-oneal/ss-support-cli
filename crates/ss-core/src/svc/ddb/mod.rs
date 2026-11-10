@@ -186,8 +186,11 @@ pub trait DdbPort: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`SvcError::NotFound`] when the table or index does not
-    /// exist, and [`SvcError::Other`] when the service call fails.
+    /// Returns [`SvcError::NotFound`] when the table does not exist. A missing
+    /// index is reported as an error, not necessarily [`SvcError::NotFound`]:
+    /// DynamoDB answers it with a validation error, which surfaces as
+    /// [`SvcError::Other`]. Any other service failure is also
+    /// [`SvcError::Other`].
     async fn query_index(
         &self,
         table: &str,
@@ -276,12 +279,22 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("split yields at least one part");
+        assert!(
+            production.contains("trait DdbPort"),
+            "the production half of the port module must hold the trait"
+        );
         let needles = [
             concat!("put", "_item"),
             concat!("update", "_item"),
             concat!("delete", "_item"),
             concat!("batch", "_write"),
             concat!("transact", "_write"),
+            concat!("execute", "_statement"),
+            concat!("batch_execute", "_statement"),
+            concat!("execute", "_transaction"),
+            concat!("create", "_table"),
+            concat!("update", "_table"),
+            concat!("delete", "_table"),
         ];
         for needle in needles {
             assert!(

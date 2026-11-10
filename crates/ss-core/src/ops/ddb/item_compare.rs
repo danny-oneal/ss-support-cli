@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use super::{parse_key, port, suggest_tables};
+use super::{parse_key_param, port, suggest_tables};
 use crate::diff::{self, Opts};
 use crate::guard::Class;
 use crate::ops::{Input, Meta, OpResult, Operation, Param, ParamType, Runner, View};
@@ -69,8 +69,8 @@ impl Operation for ItemCompare {
                 Ok((info_a, info_b))
             })
             .await?;
-        let key_a = parse_key(input.str("key-a"), &info_a).map_err(|e| e.context("key A"))?;
-        let key_b = parse_key(input.str("key-b"), &info_b).map_err(|e| e.context("key B"))?;
+        let key_a = parse_key_param("key-a", input.str("key-a"), &info_a)?;
+        let key_b = parse_key_param("key-b", input.str("key-b"), &info_b)?;
         let (label_a, label_b) = (
             format!("{table_a} {}", key_string(&key_a)),
             format!("{table_b} {}", key_string(&key_b)),
@@ -116,11 +116,12 @@ impl Operation for ItemCompare {
         })
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ops::ddb::fixture;
-    use crate::ops::{Deps, Input, RunFailure, Runner, View, find_cause};
+    use crate::ops::{Deps, FailureKind, Input, RunFailure, Runner, RunnerError, View, find_cause};
     use crate::svc::SvcError;
     use crate::svc::ddb::{FakeDdb, Item, contract};
     use serde_json::{Value, json};
@@ -306,7 +307,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_malformed_key_fails_before_any_fetch() {
+    async fn a_malformed_key_is_a_usage_error_before_any_fetch() {
         let f = fail(
             fixture::deps(fixture::fake()),
             &[
@@ -316,9 +317,35 @@ mod tests {
             ],
         )
         .await;
+        assert_eq!(f.kind, FailureKind::Usage);
+        assert!(matches!(
+            find_cause::<RunnerError>(&f.error),
+            Some(RunnerError::InvalidParam { param, value, .. })
+                if param == "key-a" && value == "nonsense"
+        ));
         let text = format!("{:#}", f.error);
         assert!(text.contains("is not name=value"), "{text}");
         assert!(!text.contains("fetch both items"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_key_of_the_wrong_shape_is_a_usage_error_naming_the_parameter() {
+        let f = fail(
+            fixture::deps(fixture::fake()),
+            &[
+                ("table", "tenants"),
+                ("key-a", "TenantId=acme,Version=V0"),
+                ("key-b", "TenantId=acme"),
+            ],
+        )
+        .await;
+        assert_eq!(f.kind, FailureKind::Usage);
+        let text = format!("{:#}", f.error);
+        assert!(text.starts_with("invalid key-b "), "{text}");
+        assert!(
+            text.contains("key must contain exactly TenantId, Version; missing Version"),
+            "{text}"
+        );
     }
 
     #[tokio::test]

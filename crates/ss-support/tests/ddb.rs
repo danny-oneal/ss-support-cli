@@ -194,7 +194,7 @@ async fn a_missing_item_exits_1_with_one_line() {
 }
 
 #[tokio::test]
-async fn a_malformed_key_exits_1() {
+async fn a_malformed_key_exits_2() {
     let root = tempfile::tempdir().expect("tempdir");
     let (exit, _, err) = ss_with(
         with_fake(root.path(), fake()),
@@ -211,12 +211,13 @@ async fn a_malformed_key_exits_1() {
         ],
     )
     .await;
-    assert_eq!(exit, Exit::Failed);
+    assert_eq!(exit, Exit::Usage);
     assert_eq!(err.lines().count(), 1, "{err}");
     assert!(
         err.starts_with("ss-support run ddb.item-compare: "),
         "{err}"
     );
+    assert!(err.contains("invalid key-a \"TenantId\""), "{err}");
     assert!(err.contains("not name=value"), "{err}");
 }
 

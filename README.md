@@ -48,7 +48,8 @@ twice takes its last value.
 
 Exit codes: `0` ok (including `--dry-run`) · `1` the operation failed, was
 denied, or was declined, or a file could not be read or written · `2` usage
-error (bad flag or param value, unknown operation or format, missing required
+error (bad flag or param value, including a DynamoDB key that is malformed or
+does not match the table's key, unknown operation or format, missing required
 param, unknown preset, nothing to save with `--save-preset`) or an unparsable
 config/presets file · `130` interrupted by Ctrl-C, SIGTERM, or SIGHUP (a second
 signal exits at once). A failed audit-log write is a `warning:` line on stderr
@@ -139,18 +140,24 @@ ss-support run ddb.gsi-consistency --table tenants --index TierIndex --key Tenan
 ```
 
 `ss-support ops describe <id>` lists each operation's params. A missing
-required param exits 2; a malformed key or a missing item exits 1 with a single
-error line. `ddb.item-compare` also takes `--table-b` to compare across tables
-and `--ignore` for extra ignore globs.
+required param, or a key that is malformed or does not hold exactly the table's
+key attributes (hash key, plus sort key if the table has one), exits 2; a
+missing item exits 1. Either way there is a single error line. Tables whose
+key has a binary attribute are not supported. `ddb.item-compare` also takes
+`--table-b` to compare across tables and `--ignore` for extra ignore globs.
 
 **Versions.** `ddb.item-history` treats the sort key as a version history:
 the version label lives in the `Version` attribute (`--version-attr` names a
-different one), `V0` is the latest, and versions come back in sort-key order,
-at most `--limit` of them (default 50, clamped to 1..=10000). `--a` and `--b`
-pick the two versions to diff.
+different one), and `V0` is the latest. All versions under the key are read
+(up to 10 000), and the table shows the first `--limit` of them after sorting
+latest-first (default 50, clamped to 1..=10000). `--a` and `--b` pick the two
+versions to diff, and a requested version is found even when it falls beyond
+the rows shown.
 
 **Index checks.** `ddb.gsi-consistency` finds the item's entry in the index
-and compares the attributes the index projects. The answer is `consistent`,
+and compares it with the base item: the whole item for an `ALL` index, the
+table and index keys for `KEYS_ONLY`, and the attributes the entry carries
+otherwise. The answer is `consistent`,
 `DRIFT` (the entry differs from the item), `MISSING` (no entry for the item),
 `INCONCLUSIVE` (no entry among the first 10 000 candidates under the index
 key, so one may exist further on), or a note that the item lacks the index's
