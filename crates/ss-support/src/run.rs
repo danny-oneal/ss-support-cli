@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use crate::cli::{Cli, GlobalFlags};
 use crate::cmd;
 use crate::io::Io;
-use crate::services::{S3Factory, Services};
+use crate::services::{DdbFactory, S3Factory, Services};
 
 /// Process exit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +109,7 @@ impl App {
         flags: &GlobalFlags,
         vars: &Vars,
         s3: &S3Factory,
+        ddb: &DdbFactory,
         cancel: CancellationToken,
     ) -> Result<Self, Failure> {
         let cfg = config::load(&config::default_path(vars))?;
@@ -123,12 +124,14 @@ impl App {
             allowed: env.allowed,
         });
         let port = Cached::new(s3(&env, vars), Arc::clone(&cache));
+        let ddb = ddb(&env, vars);
         let deps = Deps {
             cache,
             env,
             diff: cfg.diff.clone(),
             trace: cfg.trace.clone(),
             s3: Some(Arc::new(port)),
+            ddb: Some(ddb),
         };
         let user = ["USER", "LOGNAME"]
             .into_iter()
@@ -202,7 +205,13 @@ async fn pipeline(
     io: &Io,
     cancel: CancellationToken,
 ) -> Result<(), Failure> {
-    let app = App::build(&cli.global, &services.vars, &services.s3, cancel)?;
+    let app = App::build(
+        &cli.global,
+        &services.vars,
+        &services.s3,
+        &services.ddb,
+        cancel,
+    )?;
     cmd::dispatch(cli, &services.registry, &app, io).await
 }
 

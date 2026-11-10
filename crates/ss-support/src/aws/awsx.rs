@@ -29,6 +29,31 @@ pub(crate) async fn load(profile: &str, region: &str) -> SdkConfig {
     loader.load().await
 }
 
+/// Loads the SDK configuration for `env` and applies the guardrails every
+/// service adapter shares. With a custom `endpoint` only the credentials are
+/// resolved; otherwise the caller's account is verified against the
+/// environment first. `profile` names the login command in authentication
+/// hints.
+///
+/// # Errors
+///
+/// Returns an error when credentials cannot be resolved, the caller identity
+/// cannot be read, or the account does not match the environment.
+pub(crate) async fn sdk_config(
+    env: &Environment,
+    endpoint: Option<&str>,
+    profile: &str,
+) -> anyhow::Result<SdkConfig> {
+    let cfg = load(&env.profile, &env.region).await;
+    if endpoint.is_some() {
+        check_credentials(&cfg, profile).await?;
+    } else {
+        let id = check_identity(&cfg, profile).await?;
+        check_account(&id, env)?;
+    }
+    Ok(cfg)
+}
+
 /// Calls `sts:GetCallerIdentity`, turning authentication failures into
 /// actionable errors.
 pub(crate) async fn check_identity(cfg: &SdkConfig, profile: &str) -> anyhow::Result<Identity> {

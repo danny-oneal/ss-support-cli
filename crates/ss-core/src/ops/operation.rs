@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use crate::cache::{self, Store};
 use crate::config::{DiffDefaults, Environment, TraceConfig};
 use crate::guard::Class;
+use crate::svc::ddb::DdbPort;
 use crate::svc::s3::S3Port;
 
 use super::{Input, OpResult, Runner};
@@ -196,6 +197,8 @@ pub struct Deps {
     pub trace: TraceConfig,
     /// The S3 port, when this invocation has one.
     pub s3: Option<Arc<dyn S3Port>>,
+    /// The DynamoDB port, when this invocation has one.
+    pub ddb: Option<Arc<dyn DdbPort>>,
 }
 
 impl Default for Deps {
@@ -206,6 +209,7 @@ impl Default for Deps {
             diff: DiffDefaults::default(),
             trace: TraceConfig::default(),
             s3: None,
+            ddb: None,
         }
     }
 }
@@ -225,6 +229,11 @@ pub trait Operation: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_deps_have_no_ddb_port() {
+        assert!(Deps::default().ddb.is_none());
+    }
 
     #[test]
     fn param_type_names_are_stable() {

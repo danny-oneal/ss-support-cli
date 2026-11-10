@@ -18,4 +18,4 @@ pub use cli::{
 };
 pub use io::{Captured, Io, Sink, Source};
 pub use run::{Exit, run, run_with, run_with_interrupt};
-pub use services::{S3Factory, Services};
+pub use services::{DdbFactory, S3Factory, Services};
