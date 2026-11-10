@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] - 2026-11-10
+
 ### Added
 - Read-only DynamoDB operations `ddb.item-compare`, `ddb.item-history`, and
   `ddb.gsi-consistency`, with table, index, and version suggestions.

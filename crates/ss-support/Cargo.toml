@@ -12,7 +12,7 @@ name = "ss-support"
 path = "src/main.rs"
 
 [dependencies]
-ss-core = { path = "../ss-core", version = "=0.1.0-alpha.2" }
+ss-core = { path = "../ss-core", version = "=0.1.0-alpha.3" }
 anyhow.workspace = true
 async-trait.workspace = true
 aws-config.workspace = true
