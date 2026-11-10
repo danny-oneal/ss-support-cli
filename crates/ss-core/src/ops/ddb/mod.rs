@@ -14,8 +14,10 @@ use crate::svc::ddb::{AttrType, DdbPort, Item, Key, TableInfo};
 #[cfg(test)]
 pub(crate) mod fixture;
 mod item_compare;
+mod item_history;
 
 pub use item_compare::ItemCompare;
+pub use item_history::ItemHistory;
 
 /// The DynamoDB port of `deps`, or an error when the invocation has none.
 ///
@@ -145,7 +147,6 @@ pub(crate) fn version_num(label: &str) -> Option<u32> {
 
 /// The version label of `item`: the string at `attr` as is, a number `n` as
 /// `V{n}`, and an empty string for any other value or when `attr` is missing.
-#[allow(dead_code)] // not called until the DynamoDB operations land
 pub(crate) fn item_version(item: &Item, attr: &str) -> String {
     match item.get(attr) {
         Some(Value::String(s)) => s.clone(),
@@ -157,7 +158,6 @@ pub(crate) fn item_version(item: &Item, attr: &str) -> String {
 /// Sorts `items` by their version label at `attr`, keeping the order of equal
 /// labels: labels [`version_num`] understands come first in ascending numeric
 /// order, then the rest alphabetically.
-#[allow(dead_code)] // not called until the DynamoDB operations land
 pub(crate) fn sort_by_version(items: &mut [Item], attr: &str) {
     items.sort_by_cached_key(|item| {
         let label = item_version(item, attr);
@@ -172,7 +172,6 @@ pub(crate) fn sort_by_version(items: &mut [Item], attr: &str) {
 /// compact JSON, leaving out the names in `skip`. Longer than `max`
 /// characters, it is cut so that it ends in `…` and has exactly `max`
 /// characters.
-#[allow(dead_code)] // not called until the DynamoDB operations land
 pub(crate) fn compact_preview(item: &Item, skip: &BTreeSet<String>, max: usize) -> String {
     let mut entries: Vec<(&String, &Value)> = item
         .iter()
