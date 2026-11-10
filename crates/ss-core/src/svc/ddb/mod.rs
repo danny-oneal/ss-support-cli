@@ -9,6 +9,14 @@ use serde_json::Value;
 use super::SvcError;
 use crate::jsonutil;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod contract;
+#[cfg(any(test, feature = "test-support"))]
+mod fake;
+
+#[cfg(any(test, feature = "test-support"))]
+pub use fake::FakeDdb;
+
 /// A DynamoDB item (or key) as a JSON object of attribute name to value.
 pub type Item = serde_json::Map<String, Value>;
 
