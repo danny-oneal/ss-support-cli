@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4] - 2026-11-10
+
 ### Added
 - Read-only cross-service operations `config.drift` (an S3 config against a
   live Kubernetes ConfigMap) and `record.trace` (a DynamoDB record followed to
