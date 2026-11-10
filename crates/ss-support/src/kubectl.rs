@@ -734,6 +734,92 @@ exit 1"#;
     }
 
     #[tokio::test]
+    async fn every_invocation_is_get_or_logs() {
+        let _serial = serial().await;
+        let dir = TempDir::new().expect("tempdir");
+        let bin = stub(&dir, r#"echo "$@" >> "$0.args"; echo '{}'"#);
+        let port = exec(&bin);
+        port.get_json("menu", "configmap", "menu-config")
+            .await
+            .expect("get");
+        port.get_json("", "configmap", "menu-config")
+            .await
+            .expect("get without a namespace");
+        port.list_json("menu", "pods").await.expect("list");
+        collect(port.logs("menu", "pod-a", false).await.expect("logs")).await;
+        collect(port.logs("", "pod-a", true).await.expect("follow")).await;
+
+        let calls = std::fs::read_to_string(sidecar(&bin, ".args")).expect("recorded");
+        assert_eq!(calls.lines().count(), 5, "{calls}");
+        for line in calls.lines() {
+            let rest = line
+                .strip_prefix("--context c ")
+                .unwrap_or_else(|| panic!("no pinned context: {line}"));
+            let rest = match rest.strip_prefix("-n ") {
+                Some(after) => {
+                    after
+                        .split_once(' ')
+                        .unwrap_or_else(|| panic!("namespace without a verb: {line}"))
+                        .1
+                }
+                None => rest,
+            };
+            assert!(
+                rest.starts_with("get ") || rest.starts_with("logs "),
+                "not a get or logs call: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_adapter_names_no_write_verb() {
+        // The test module is the only gated item, so the production half is
+        // everything before its attribute.
+        let production = include_str!("kubectl.rs")
+            .split(concat!("#[cfg(all(", "test, unix))]"))
+            .next()
+            .expect("split yields at least one part");
+        assert!(
+            production.contains("impl KubectlPort for KubectlExec"),
+            "the production half of the adapter must hold the port implementation"
+        );
+        assert!(
+            production.contains("fn run_get") && production.contains("\"logs\""),
+            "the production half of the adapter must hold its get and logs calls"
+        );
+        assert!(
+            !production.contains("mod tests"),
+            "the production half must end before the test module"
+        );
+        // Quoted, so prose and identifiers (`exec`, `Options`) do not match;
+        // assembled with `concat!` so this list cannot match itself.
+        let literals = [
+            concat!("\"", "rollout", "\""),
+            concat!("\"", "scale", "\""),
+            concat!("\"", "apply", "\""),
+            concat!("\"", "patch", "\""),
+            concat!("\"", "delete", "\""),
+            concat!("\"", "edit", "\""),
+            concat!("\"", "create", "\""),
+            concat!("\"", "replace", "\""),
+            concat!("\"", "annotate", "\""),
+            concat!("\"", "label", "\""),
+            concat!("\"", "exec", "\""),
+            concat!("\"", "cp", "\""),
+            concat!("\"", "port-forward", "\""),
+            concat!("\"", "drain", "\""),
+            concat!("\"", "cordon", "\""),
+            concat!("\"", "taint", "\""),
+        ];
+        for literal in literals {
+            assert!(
+                !production.contains(literal),
+                "the adapter names the verb {literal}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn an_unavailable_port_fails_every_call() {
         let port = Unavailable::new("nope");
         for err in [

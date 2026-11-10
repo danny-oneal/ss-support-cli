@@ -218,6 +218,87 @@ mod tests {
         assert!(configmap_data(br#"{"metadata":{}}"#).unwrap().is_empty());
     }
 
+    /// A port with exactly the three read methods and nothing else.
+    struct ReadOnly;
+
+    #[async_trait]
+    impl KubectlPort for ReadOnly {
+        async fn get_json(
+            &self,
+            _namespace: &str,
+            _resource: &str,
+            _name: &str,
+        ) -> Result<Vec<u8>, SvcError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_json(&self, _namespace: &str, _resource: &str) -> Result<Vec<u8>, SvcError> {
+            Ok(Vec::new())
+        }
+
+        async fn logs(
+            &self,
+            _namespace: &str,
+            _pod: &str,
+            _follow: bool,
+        ) -> Result<tokio::sync::mpsc::Receiver<String>, SvcError> {
+            Err(SvcError::Other(anyhow::anyhow!("read-only fixture")))
+        }
+    }
+
+    #[test]
+    fn the_port_has_no_write_method() {
+        // Compiles only while the trait has no required method beyond the
+        // three reads above.
+        let _port: &dyn KubectlPort = &ReadOnly;
+
+        let production = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split yields at least one part");
+        assert!(
+            production.contains("trait KubectlPort"),
+            "the production half of the port module must hold the trait"
+        );
+        // Anchors: the scan covers the whole trait and stops where the test
+        // module starts, so a misplaced marker cannot make it vacuous.
+        for read in [
+            "fn get_json",
+            "fn list_json",
+            "fn logs",
+            "fn configmap_data",
+        ] {
+            assert!(
+                production.contains(read),
+                "the production half of the port module must hold `{read}`"
+            );
+        }
+        assert!(
+            !production.contains("mod tests"),
+            "the production half must end before the test module"
+        );
+        let needles = [
+            concat!("fn ", "rollout"),
+            concat!("fn ", "scale"),
+            concat!("fn ", "apply"),
+            concat!("fn ", "patch"),
+            concat!("fn ", "delete"),
+            concat!("fn ", "edit"),
+            concat!("fn ", "replace"),
+            concat!("fn ", "annotate"),
+            concat!("fn ", "label"),
+            concat!("fn ", "drain"),
+            concat!("fn ", "cordon"),
+            concat!("fn ", "taint"),
+        ];
+        for needle in needles {
+            assert!(
+                !production.contains(needle),
+                "the port source declares {needle}"
+            );
+        }
+    }
+
     #[test]
     fn configmap_rejects_malformed_json() {
         let err = configmap_data(b"[").unwrap_err();
