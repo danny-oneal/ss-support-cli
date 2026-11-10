@@ -1,5 +1,5 @@
 [package]
-name = "ss"
+name = "ss-support"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Support operations CLI for non-production AWS and Kubernetes"
 
 [[bin]]
-name = "ss"
+name = "ss-support"
 path = "src/main.rs"
 
 [dependencies]

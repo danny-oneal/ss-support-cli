@@ -1,4 +1,4 @@
-# ss — developer entry points.
+# ss-support — developer entry points.
 # `make help` lists targets; `make check` is what CI runs.
 
 .DEFAULT_GOAL := build
@@ -28,11 +28,11 @@ check: lint test
 msrv:
 	cargo +1.88 check --workspace --all-targets --locked
 
-## contract: S3 contract suite against MinIO (needs SS_S3_TEST_ENDPOINT, e.g. http://127.0.0.1:9000)
+## contract: S3 contract suite against MinIO (needs SS_SUPPORT_S3_TEST_ENDPOINT, e.g. http://127.0.0.1:9000)
 .PHONY: contract
 contract:
-	@test -n "$(SS_S3_TEST_ENDPOINT)" || { echo "set SS_S3_TEST_ENDPOINT"; exit 2; }
-	cargo test --locked -p ss aws::s3::minio -- --nocapture
+	@test -n "$(SS_SUPPORT_S3_TEST_ENDPOINT)" || { echo "set SS_SUPPORT_S3_TEST_ENDPOINT"; exit 2; }
+	cargo test --locked -p ss-support aws::s3::minio -- --nocapture
 
 ## clean: remove build artifacts
 .PHONY: clean

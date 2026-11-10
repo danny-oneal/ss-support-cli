@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- The binary and package are renamed from `ss` to `ss-support`, so the tool no
+  longer collides with the system `ss` socket-statistics command.
+- Environment variables move from `SS_*` to `SS_SUPPORT_*` (`SS_SUPPORT_ENV`,
+  `SS_SUPPORT_PROFILE`, `SS_SUPPORT_REGION`, `SS_SUPPORT_CONFIG`,
+  `SS_SUPPORT_PRESETS`, `SS_SUPPORT_S3_ENDPOINT`, and the `*_TEST_*` ones).
+- Config, presets, cache, and audit log directories move from `…/ss/` to
+  `…/ss-support/` (`~/.config/ss-support/config.yaml`, `~/.cache/ss-support/`,
+  `~/.local/state/ss-support/audit.log`). Existing files must be moved by hand.
+
 ## [0.1.0-alpha.1] - 2026-11-09
 
 ### Added

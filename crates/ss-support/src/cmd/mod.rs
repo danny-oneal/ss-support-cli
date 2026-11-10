@@ -27,7 +27,7 @@ pub(crate) async fn dispatch(
     }
 }
 
-/// Writes `text` to stdout. A reader that has gone away (`ss ops list |
+/// Writes `text` to stdout. A reader that has gone away (`ss-support ops list |
 /// head -1`) is not a failure.
 fn print(io: &Io, text: &str) -> Result<(), Failure> {
     let mut stdout = io.stdout.clone();

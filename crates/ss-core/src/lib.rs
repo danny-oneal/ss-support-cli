@@ -1,4 +1,4 @@
-//! Core library for the `ss` support operations CLI: the semantic JSON
+//! Core library for the `ss-support` support operations CLI: the semantic JSON
 //! [`diff`] engine and the [`jsonutil`] helpers it is built on, the [`vars`]
 //! environment snapshot, the [`config`] file with its precedence rules, the
 //! environment [`guard`], the [`audit`] trail, the [`cache`] store, the named

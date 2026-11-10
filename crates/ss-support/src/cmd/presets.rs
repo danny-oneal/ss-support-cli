@@ -1,4 +1,4 @@
-//! `ss presets list`, `show`, and `delete`.
+//! `ss-support presets list`, `show`, and `delete`.
 
 use ss_core::ops::View;
 use ss_core::preset::{PresetError, Store};
@@ -37,7 +37,7 @@ fn list(store: &Store, op: Option<&str>, io: &Io) -> Result<(), Failure> {
     if rows.is_empty() {
         return print(
             io,
-            "no presets saved yet — use `ss run <op> ... --save-preset <name>`\n",
+            "no presets saved yet — use `ss-support run <op> ... --save-preset <name>`\n",
         );
     }
     print(

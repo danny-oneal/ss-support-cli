@@ -414,9 +414,9 @@ mod tests {
 }
 
 /// Runs against any versioned S3-compatible endpoint named by
-/// `SS_S3_TEST_ENDPOINT` (e.g. MinIO at `http://127.0.0.1:9000`); skipped
-/// when it is unset. Credentials come from `SS_S3_TEST_KEY` and
-/// `SS_S3_TEST_SECRET`, both defaulting to `minioadmin`.
+/// `SS_SUPPORT_S3_TEST_ENDPOINT` (e.g. MinIO at `http://127.0.0.1:9000`); skipped
+/// when it is unset. Credentials come from `SS_SUPPORT_S3_TEST_KEY` and
+/// `SS_SUPPORT_S3_TEST_SECRET`, both defaulting to `minioadmin`.
 #[cfg(test)]
 mod minio {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -467,16 +467,16 @@ mod minio {
     /// Creates and seeds the bucket, or returns `None` when no endpoint is
     /// configured.
     async fn seed() -> Option<Seeded> {
-        let Some(endpoint) = std::env::var("SS_S3_TEST_ENDPOINT")
+        let Some(endpoint) = std::env::var("SS_SUPPORT_S3_TEST_ENDPOINT")
             .ok()
             .filter(|v| !v.is_empty())
         else {
-            eprintln!("skipping: SS_S3_TEST_ENDPOINT is not set");
+            eprintln!("skipping: SS_SUPPORT_S3_TEST_ENDPOINT is not set");
             return None;
         };
         let creds = Credentials::new(
-            env_or("SS_S3_TEST_KEY", "minioadmin"),
-            env_or("SS_S3_TEST_SECRET", "minioadmin"),
+            env_or("SS_SUPPORT_S3_TEST_KEY", "minioadmin"),
+            env_or("SS_SUPPORT_S3_TEST_SECRET", "minioadmin"),
             None,
             None,
             "static",

@@ -1,4 +1,4 @@
-//! The `ss` config file: environment allowlist and diff defaults, plus the
+//! The `ss-support` config file: environment allowlist and diff defaults, plus the
 //! precedence chain flag > env var > file value > default.
 
 use std::collections::BTreeMap;
@@ -100,14 +100,14 @@ impl ConfigError {
     }
 }
 
-/// Returns the config file location: `SS_CONFIG`, else
-/// `$XDG_CONFIG_HOME/ss/config.yaml`, else `~/.config/ss/config.yaml`.
+/// Returns the config file location: `SS_SUPPORT_CONFIG`, else
+/// `$XDG_CONFIG_HOME/ss-support/config.yaml`, else `~/.config/ss-support/config.yaml`.
 pub fn default_path(v: &Vars) -> PathBuf {
-    if let Some(p) = vars::get(v, "SS_CONFIG") {
+    if let Some(p) = vars::get(v, "SS_SUPPORT_CONFIG") {
         return PathBuf::from(p);
     }
     vars::base_dir(v, "XDG_CONFIG_HOME", ".config")
-        .join("ss")
+        .join("ss-support")
         .join("config.yaml")
 }
 
@@ -197,20 +197,20 @@ mod tests {
     #[test]
     fn default_path_honors_ss_config_then_xdg_then_home() {
         assert_eq!(
-            default_path(&vars(&[("SS_CONFIG", "/x/c.yaml")])),
+            default_path(&vars(&[("SS_SUPPORT_CONFIG", "/x/c.yaml")])),
             PathBuf::from("/x/c.yaml")
         );
         assert_eq!(
             default_path(&vars(&[("XDG_CONFIG_HOME", "/xdg")])),
-            PathBuf::from("/xdg/ss/config.yaml")
+            PathBuf::from("/xdg/ss-support/config.yaml")
         );
         assert_eq!(
             default_path(&vars(&[("HOME", "/h")])),
-            PathBuf::from("/h/.config/ss/config.yaml")
+            PathBuf::from("/h/.config/ss-support/config.yaml")
         );
         assert_eq!(
-            default_path(&vars(&[("SS_CONFIG", ""), ("HOME", "/h")])),
-            PathBuf::from("/h/.config/ss/config.yaml")
+            default_path(&vars(&[("SS_SUPPORT_CONFIG", ""), ("HOME", "/h")])),
+            PathBuf::from("/h/.config/ss-support/config.yaml")
         );
     }
 

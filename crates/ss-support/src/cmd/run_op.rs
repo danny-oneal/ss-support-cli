@@ -1,4 +1,4 @@
-//! `ss run <operation>`: resolve the input, run the operation, print the
+//! `ss-support run <operation>`: resolve the input, run the operation, print the
 //! result, then export the report and save the preset when asked.
 
 use std::fs;
@@ -33,10 +33,10 @@ pub(super) async fn run(
     let call = cmd
         .call
         .as_ref()
-        .ok_or_else(|| Failure::Usage(anyhow!("no operation given (try `ss ops list`)")))?;
+        .ok_or_else(|| Failure::Usage(anyhow!("no operation given (try `ss-support ops list`)")))?;
     let op = registry.get(&call.id).ok_or_else(|| {
         Failure::Usage(anyhow!(
-            "unknown operation {:?} (try `ss ops list`)",
+            "unknown operation {:?} (try `ss-support ops list`)",
             call.id
         ))
     })?;

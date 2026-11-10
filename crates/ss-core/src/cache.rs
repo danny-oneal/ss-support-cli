@@ -84,9 +84,9 @@ impl Store for Dir {
     }
 }
 
-/// The default cache location: `$XDG_CACHE_HOME/ss`, else `~/.cache/ss`.
+/// The default cache location: `$XDG_CACHE_HOME/ss-support`, else `~/.cache/ss-support`.
 pub fn default_dir(v: &Vars) -> PathBuf {
-    vars::base_dir(v, "XDG_CACHE_HOME", ".cache").join("ss")
+    vars::base_dir(v, "XDG_CACHE_HOME", ".cache").join("ss-support")
 }
 
 #[cfg(test)]
@@ -147,11 +147,11 @@ mod tests {
             .iter()
             .map(|(k, val)| ((*k).to_owned(), (*val).to_owned()))
             .collect();
-        assert_eq!(default_dir(&v), PathBuf::from("/c/ss"));
+        assert_eq!(default_dir(&v), PathBuf::from("/c/ss-support"));
         let v: Vars = [("HOME", "/h")]
             .iter()
             .map(|(k, val)| ((*k).to_owned(), (*val).to_owned()))
             .collect();
-        assert_eq!(default_dir(&v), PathBuf::from("/h/.cache/ss"));
+        assert_eq!(default_dir(&v), PathBuf::from("/h/.cache/ss-support"));
     }
 }

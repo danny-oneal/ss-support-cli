@@ -14,7 +14,7 @@ pub mod dynamic;
 /// default; until it exists, a bare invocation prints help.
 #[derive(Parser, Debug, Clone)]
 #[command(
-    name = "ss",
+    name = "ss-support",
     version,
     about = "Support operations for non-production AWS and Kubernetes"
 )]
@@ -31,13 +31,13 @@ pub struct Cli {
 /// subcommand.
 #[derive(Args, Debug, Clone, Default)]
 pub struct GlobalFlags {
-    /// Override the environment's AWS profile (SS_PROFILE)
+    /// Override the environment's AWS profile (SS_SUPPORT_PROFILE)
     #[arg(long, global = true, value_name = "NAME")]
     pub profile: Option<String>,
-    /// Override the environment's AWS region (SS_REGION)
+    /// Override the environment's AWS region (SS_SUPPORT_REGION)
     #[arg(long, global = true, value_name = "REGION")]
     pub region: Option<String>,
-    /// Target environment; writes require it in the config allowlist (SS_ENV) [default: config default_env]
+    /// Target environment; writes require it in the config allowlist (SS_SUPPORT_ENV) [default: config default_env]
     #[arg(long, global = true, value_name = "NAME")]
     pub env: Option<String>,
     /// Override the environment's Kubernetes context
@@ -87,17 +87,22 @@ impl GlobalFlags {
     pub fn resolve_env(&self, cfg: &config::File, vars: &Vars) -> Environment {
         let name = config::resolve(
             self.env.as_deref(),
-            vars::get(vars, "SS_ENV"),
+            vars::get(vars, "SS_SUPPORT_ENV"),
             &cfg.default_env,
             "",
         );
         let profile = config::resolve(
             self.profile.as_deref(),
-            vars::get(vars, "SS_PROFILE"),
+            vars::get(vars, "SS_SUPPORT_PROFILE"),
             "",
             "",
         );
-        let region = config::resolve(self.region.as_deref(), vars::get(vars, "SS_REGION"), "", "");
+        let region = config::resolve(
+            self.region.as_deref(),
+            vars::get(vars, "SS_SUPPORT_REGION"),
+            "",
+            "",
+        );
         let mut env = cfg.env(&name, &profile, &region);
         if let Some(context) = self.context.as_deref().filter(|c| !c.is_empty()) {
             context.clone_into(&mut env.kube_context);
@@ -119,7 +124,7 @@ pub enum Command {
     Presets(PresetsCmd),
 }
 
-/// `ss ops ...`
+/// `ss-support ops ...`
 #[derive(Subcommand, Debug, Clone)]
 pub enum OpsCmd {
     /// List every registered operation
@@ -132,7 +137,7 @@ pub enum OpsCmd {
     },
 }
 
-/// `ss presets ...`
+/// `ss-support presets ...`
 #[derive(Subcommand, Debug, Clone)]
 pub enum PresetsCmd {
     /// List saved presets, optionally for one operation
@@ -161,7 +166,7 @@ pub enum PresetsCmd {
     },
 }
 
-/// `ss run <operation> ...`
+/// `ss-support run <operation> ...`
 #[derive(Args, Debug, Clone)]
 pub struct RunCmd {
     /// Load a saved parameter preset; explicit flags override it
@@ -190,16 +195,18 @@ impl Cli {
     /// The prefix of every one-line error: the command that failed.
     pub fn prefix(&self) -> String {
         match &self.command {
-            None => "ss".to_owned(),
-            Some(Command::Ops(OpsCmd::List)) => "ss ops list".to_owned(),
-            Some(Command::Ops(OpsCmd::Describe { .. })) => "ss ops describe".to_owned(),
+            None => "ss-support".to_owned(),
+            Some(Command::Ops(OpsCmd::List)) => "ss-support ops list".to_owned(),
+            Some(Command::Ops(OpsCmd::Describe { .. })) => "ss-support ops describe".to_owned(),
             Some(Command::Run(RunCmd {
                 call: Some(call), ..
-            })) => format!("ss run {}", call.id),
-            Some(Command::Run(_)) => "ss run".to_owned(),
-            Some(Command::Presets(PresetsCmd::List { .. })) => "ss presets list".to_owned(),
-            Some(Command::Presets(PresetsCmd::Show { .. })) => "ss presets show".to_owned(),
-            Some(Command::Presets(PresetsCmd::Delete { .. })) => "ss presets delete".to_owned(),
+            })) => format!("ss-support run {}", call.id),
+            Some(Command::Run(_)) => "ss-support run".to_owned(),
+            Some(Command::Presets(PresetsCmd::List { .. })) => "ss-support presets list".to_owned(),
+            Some(Command::Presets(PresetsCmd::Show { .. })) => "ss-support presets show".to_owned(),
+            Some(Command::Presets(PresetsCmd::Delete { .. })) => {
+                "ss-support presets delete".to_owned()
+            }
         }
     }
 }
@@ -270,7 +277,7 @@ mod tests {
 
     #[test]
     fn run_collects_only_explicit_flags() {
-        let cli = parse(&["ss", "run", "demo.hello", "--name", "x"]).expect("parses");
+        let cli = parse(&["ss-support", "run", "demo.hello", "--name", "x"]).expect("parses");
         let call = call(&cli);
         assert_eq!(call.id, "demo.hello");
         assert_eq!(call.input, [("name", "x")].into_iter().collect::<Input>());
@@ -278,34 +285,57 @@ mod tests {
 
     #[test]
     fn bool_params_accept_bare_and_explicit() {
-        let cli = parse(&["ss", "run", "demo.hello", "--shout"]).expect("parses");
+        let cli = parse(&["ss-support", "run", "demo.hello", "--shout"]).expect("parses");
         assert_eq!(call(&cli).input.str("shout"), "true");
-        let cli = parse(&["ss", "run", "demo.hello", "--shout=false"]).expect("parses");
+        let cli = parse(&["ss-support", "run", "demo.hello", "--shout=false"]).expect("parses");
         assert_eq!(call(&cli).input.str("shout"), "false");
         assert!(call(&cli).input.contains("shout"));
     }
 
     #[test]
     fn op_params_take_hyphen_leading_values() {
-        let cli =
-            parse(&["ss", "run", "demo.hello", "--repeat", "-1", "--name", "-x"]).expect("parses");
+        let cli = parse(&[
+            "ss-support",
+            "run",
+            "demo.hello",
+            "--repeat",
+            "-1",
+            "--name",
+            "-x",
+        ])
+        .expect("parses");
         assert_eq!(call(&cli).input.str("repeat"), "-1");
         assert_eq!(call(&cli).input.str("name"), "-x");
     }
 
     #[test]
     fn repeated_op_params_take_the_last_value() {
-        let cli =
-            parse(&["ss", "run", "demo.hello", "--name", "a", "--name", "b"]).expect("parses");
+        let cli = parse(&[
+            "ss-support",
+            "run",
+            "demo.hello",
+            "--name",
+            "a",
+            "--name",
+            "b",
+        ])
+        .expect("parses");
         assert_eq!(call(&cli).input.str("name"), "b");
-        let cli = parse(&["ss", "run", "demo.hello", "--shout", "--shout=false"]).expect("parses");
+        let cli = parse(&[
+            "ss-support",
+            "run",
+            "demo.hello",
+            "--shout",
+            "--shout=false",
+        ])
+        .expect("parses");
         assert_eq!(call(&cli).input.str("shout"), "false");
     }
 
     #[test]
     fn globals_parse_after_the_op_id() {
         let cli = parse(&[
-            "ss",
+            "ss-support",
             "run",
             "demo.hello",
             "--name",
@@ -331,7 +361,10 @@ mod tests {
 
     #[test]
     fn unknown_op_and_missing_op_are_usage_errors() {
-        for args in [&["ss", "run", "nope"][..], &["ss", "run"][..]] {
+        for args in [
+            &["ss-support", "run", "nope"][..],
+            &["ss-support", "run"][..],
+        ] {
             let err = parse(args).expect_err("usage error");
             assert_eq!(err.exit_code(), 2, "{args:?}");
         }
@@ -401,7 +434,7 @@ mod tests {
         assert!(env.allowed);
         assert_eq!(env.profile, "p-dev");
 
-        let stage = Vars::from([("SS_ENV".to_owned(), "stage".to_owned())]);
+        let stage = Vars::from([("SS_SUPPORT_ENV".to_owned(), "stage".to_owned())]);
         assert_eq!(
             GlobalFlags::default().resolve_env(&cfg, &stage).name,
             "stage"
@@ -427,7 +460,7 @@ mod tests {
         };
         assert_eq!(context.resolve_env(&cfg, &none).kube_context, "k2");
 
-        let from_var = Vars::from([("SS_PROFILE".to_owned(), "y".to_owned())]);
+        let from_var = Vars::from([("SS_SUPPORT_PROFILE".to_owned(), "y".to_owned())]);
         assert_eq!(
             GlobalFlags::default().resolve_env(&cfg, &from_var).profile,
             "y"
@@ -437,13 +470,22 @@ mod tests {
     #[test]
     fn prefix_names_the_subcommand() {
         let prefix = |args: &[&str]| parse(args).expect("parses").prefix();
-        assert_eq!(prefix(&["ss", "run", "demo.hello"]), "ss run demo.hello");
-        assert_eq!(prefix(&["ss", "ops", "describe", "x"]), "ss ops describe");
-        assert_eq!(prefix(&["ss", "ops", "list"]), "ss ops list");
         assert_eq!(
-            prefix(&["ss", "presets", "show", "a", "b"]),
-            "ss presets show"
+            prefix(&["ss-support", "run", "demo.hello"]),
+            "ss-support run demo.hello"
         );
-        assert_eq!(prefix(&["ss"]), "ss");
+        assert_eq!(
+            prefix(&["ss-support", "ops", "describe", "x"]),
+            "ss-support ops describe"
+        );
+        assert_eq!(
+            prefix(&["ss-support", "ops", "list"]),
+            "ss-support ops list"
+        );
+        assert_eq!(
+            prefix(&["ss-support", "presets", "show", "a", "b"]),
+            "ss-support presets show"
+        );
+        assert_eq!(prefix(&["ss-support"]), "ss-support");
     }
 }

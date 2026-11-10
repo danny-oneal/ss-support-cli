@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 
 fn interrupted_by(signal: &str) {
     let root = tempfile::tempdir().expect("tempdir");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ss"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ss-support"))
         .args(["run", "demo.hello", "--name", "x", "-v"])
         .env_clear()
         .env("HOME", root.path())
@@ -16,7 +16,7 @@ fn interrupted_by(signal: &str) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn ss");
+        .expect("spawn ss-support");
     let mut stderr = BufReader::new(child.stderr.take().expect("piped stderr"));
 
     // The first progress line means the run is under way, so the signal
@@ -34,14 +34,15 @@ fn interrupted_by(signal: &str) {
 
     let mut rest = String::new();
     stderr.read_to_string(&mut rest).expect("read stderr");
-    let status = child.wait().expect("wait for ss");
+    let status = child.wait().expect("wait for ss-support");
     assert_eq!(
         status.code(),
         Some(130),
         "{signal}: {status:?}, stderr: {rest}"
     );
     assert_eq!(
-        rest, "✗ compose greeting: cancelled\nss run demo.hello: compose greeting: cancelled\n",
+        rest,
+        "✗ compose greeting: cancelled\nss-support run demo.hello: compose greeting: cancelled\n",
         "{signal}"
     );
 }

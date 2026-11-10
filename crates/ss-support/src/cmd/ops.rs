@@ -1,4 +1,4 @@
-//! `ss ops list` and `ss ops describe`.
+//! `ss-support ops list` and `ss-support ops describe`.
 
 use anyhow::anyhow;
 use ss_core::ops::{Registry, View};
@@ -33,9 +33,11 @@ fn list(registry: &Registry, io: &Io) -> Result<(), Failure> {
 }
 
 fn describe(registry: &Registry, id: &str, io: &Io) -> Result<(), Failure> {
-    let op = registry
-        .get(id)
-        .ok_or_else(|| Failure::Usage(anyhow!("unknown operation {id:?} (try `ss ops list`)")))?;
+    let op = registry.get(id).ok_or_else(|| {
+        Failure::Usage(anyhow!(
+            "unknown operation {id:?} (try `ss-support ops list`)"
+        ))
+    })?;
     let meta = op.meta();
     let rows = op
         .params()
