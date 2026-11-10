@@ -13,6 +13,9 @@ use crate::jsonutil;
 pub mod contract;
 #[cfg(any(test, feature = "test-support"))]
 mod fake;
+mod lazy;
+
+pub use lazy::Lazy;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use fake::FakeDdb;
