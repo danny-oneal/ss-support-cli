@@ -1,6 +1,7 @@
 //! Service ports: the narrow interfaces operations use to reach external
-//! systems, plus the error type they share.
+//! systems (S3 and DynamoDB), plus the error type they share.
 
+pub mod ddb;
 pub mod s3;
 
 /// A failure reported by a service port.
