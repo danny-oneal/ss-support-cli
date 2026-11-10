@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2] - 2026-11-10
+
 ### Changed
 - The binary and package are renamed from `ss` to `ss-support`, so the tool no
   longer collides with the system `ss` socket-statistics command.
