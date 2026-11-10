@@ -34,6 +34,9 @@ pub fn builtin() -> Registry {
         .register(Arc::new(demo::JsonDiff))
         .expect("builtin operation ids are unique");
     registry
+        .register(Arc::new(ddb::GsiConsistency))
+        .expect("builtin operation ids are unique");
+    registry
         .register(Arc::new(ddb::ItemCompare))
         .expect("builtin operation ids are unique");
     registry
@@ -63,6 +66,7 @@ mod tests {
             [
                 "demo.hello",
                 "demo.json-diff",
+                "ddb.gsi-consistency",
                 "ddb.item-compare",
                 "ddb.item-history",
                 "s3.object-inspect",

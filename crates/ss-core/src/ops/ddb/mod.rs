@@ -13,9 +13,11 @@ use crate::svc::ddb::{AttrType, DdbPort, Item, Key, TableInfo};
 
 #[cfg(test)]
 pub(crate) mod fixture;
+mod gsi_consistency;
 mod item_compare;
 mod item_history;
 
+pub use gsi_consistency::GsiConsistency;
 pub use item_compare::ItemCompare;
 pub use item_history::ItemHistory;
 
@@ -51,7 +53,6 @@ pub(crate) fn suggest_tables() -> SuggestFn {
 }
 
 /// Suggests the global secondary indexes of the typed `table`.
-#[allow(dead_code)] // not called until the DynamoDB operations land
 pub(crate) fn suggest_indexes() -> SuggestFn {
     Arc::new(|deps: Deps, input: Input| {
         Box::pin(async move {
