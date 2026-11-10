@@ -1,7 +1,8 @@
 //! Service ports: the narrow interfaces operations use to reach external
-//! systems (S3 and DynamoDB), plus the error type they share.
+//! systems (S3, DynamoDB and Kubernetes), plus the error type they share.
 
 pub mod ddb;
+pub mod kubectl;
 pub mod s3;
 
 /// A failure reported by a service port.
