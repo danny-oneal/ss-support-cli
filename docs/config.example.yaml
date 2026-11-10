@@ -12,7 +12,7 @@ environments:
     profile: acme-dev          # AWS named profile (SSO / assume-role chains resolve via the SDK)
     region: us-west-2
     account_id: "111122223333" # checked against sts:GetCallerIdentity before S3 calls and writes
-    kube_context: dev-cluster  # checked against the current kubectl context before writes
+    kube_context: dev-cluster  # every kubectl call is pinned to this context (--context overrides)
   staging:
     profile: acme-staging
     region: us-west-2

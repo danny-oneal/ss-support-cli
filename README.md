@@ -33,7 +33,7 @@ Global flags work before or after the subcommand.
 | `--env NAME` | `SS_SUPPORT_ENV`, then `default_env` in the config | writes are refused unless `NAME` is in the config's `environments` |
 | `--profile NAME` | `SS_SUPPORT_PROFILE`, then the environment's `profile` | AWS profile |
 | `--region REGION` | `SS_SUPPORT_REGION`, then the environment's `region` | AWS region |
-| `--context KUBE_CONTEXT` | the environment's `kube_context` | Kubernetes context |
+| `--context KUBE_CONTEXT` | the environment's `kube_context` | Kubernetes context; every kubectl call is pinned to it, and Kubernetes-backed operations refuse to run without one |
 | `-o, --output FORMAT` | `text` | `text` or `json` (`{"views":[...]}`); anything else exits 2 before running |
 | `--export FILE` | | after a successful run, writes a markdown report with the resolved params |
 | `--dry-run` | | stops before the first mutating step; exits 0 |
@@ -49,8 +49,10 @@ twice takes its last value.
 Exit codes: `0` ok (including `--dry-run`) · `1` the operation failed, was
 denied, or was declined, or a file could not be read or written · `2` usage
 error (bad flag or param value, including a DynamoDB key that is malformed or
-does not match the table's key, unknown operation or format, missing required
-param, unknown preset, nothing to save with `--save-preset`) or an unparsable
+does not match the table's key, an unknown `record.trace` domain, malformed
+`--vars`, or an ambiguous or unknown ConfigMap data key, unknown operation or
+format, missing required param, unknown preset, nothing to save with
+`--save-preset`) or an unparsable
 config/presets file · `130` interrupted by Ctrl-C, SIGTERM, or SIGHUP (a second
 signal exits at once). A failed audit-log write is a `warning:` line on stderr
 and does not change the exit code.
@@ -206,3 +208,58 @@ SS_SUPPORT_REGION=us-east-1 SS_SUPPORT_DDB_ENDPOINT=http://127.0.0.1:8000 \
 
 `SS_SUPPORT_DDB_TEST_ENDPOINT=http://127.0.0.1:8000 make contract-ddb` runs
 the DynamoDB contract suite against the same server.
+
+## Cross-service
+
+Two operations follow a configuration across services. Both are read-only:
+they never write to S3, DynamoDB, or the cluster, and, like every read, they
+are not written to the audit log.
+
+```bash
+# does the cluster run the config stored in S3? (--configmap name[:data-key])
+ss-support run config.drift --bucket my-bucket --key menu/12345.json \
+  --configmap menu-config:menu.json --namespace menu
+
+# a specific S3 version instead of the current one
+ss-support run config.drift --bucket my-bucket --key menu/12345.json --version <version-id> \
+  --configmap menu-config:menu.json --namespace menu
+
+# follow a DynamoDB record to its S3 config and the version before it;
+# --configmap also diffs the live ConfigMap, --version picks the record version (V0 = latest)
+ss-support run record.trace --domain menu --id 12345 \
+  --vars locale=en-US,channel=mobile --configmap menu-config:menu.json
+```
+
+`config.drift` reports `in sync` or `DRIFT (...)` with the diff. `record.trace`
+reads the record, fetches the S3 object version the record names, diffs it
+against the previous version (delete markers are skipped), and, with
+`--configmap`, against the live ConfigMap. `--namespace` defaults to
+`default` for `config.drift` and to the domain's `namespace` for
+`record.trace`; an empty namespace uses the context's default.
+`--configmap name` works when the ConfigMap holds one data key; use
+`name:data-key` when it holds several. `ss-support ops describe <id>` lists
+each operation's params.
+
+**Record domains.** `record.trace` reads its record shapes from
+`trace.domains` in `config.yaml`; `docs/config.example.yaml` shows the
+fields. Only deviations from the common shape need spelling out:
+`hash_attr` defaults to `hash`, `version_attr` to `version`, `s3_key_attr` to
+`key`, and `s3_version_attr` to `versionId`. `table` and `bucket` may use an
+`{env}` template, and per-environment `tables` and `buckets` maps override it.
+A `sort_format` such as `{locale}#{channel}` is filled from `--vars`
+(`name=value` pairs separated by commas).
+
+**Kubernetes access.** ConfigMaps are read through `kubectl`, which must be on
+`PATH` (otherwise the run stops with `kubectl not found at "kubectl" (install
+kubectl or put it on PATH)`). Every call is pinned to the environment's
+`kube_context` (or `--context`); kubectl's own current context is never used.
+With neither, the run exits 1 with `no Kubernetes context for environment
+"<env>": set kube_context in config.yaml or pass --context`, and kubectl is
+not started. Only `kubectl get` and `kubectl logs` are ever executed, and
+kubectl output over 32 MiB is refused.
+
+**Exit codes.** A bad domain, malformed `--vars`, missing sort vars, an
+ambiguous or unknown ConfigMap data key, an empty ConfigMap name, or a missing
+required param exits 2. A missing record, S3 object, or ConfigMap, or
+ConfigMap data that is not JSON, exits 1. Either way there is a single error
+line.
