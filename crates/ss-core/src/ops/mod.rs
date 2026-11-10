@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 mod confirm;
+pub mod ddb;
 pub mod demo;
 mod input;
 mod operation;
