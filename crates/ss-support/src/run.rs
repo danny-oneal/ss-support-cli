@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use crate::cli::{Cli, GlobalFlags};
 use crate::cmd;
 use crate::io::Io;
-use crate::services::{DdbFactory, S3Factory, Services};
+use crate::services::{DdbFactory, KubectlFactory, S3Factory, Services};
 
 /// Process exit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +110,7 @@ impl App {
         vars: &Vars,
         s3: &S3Factory,
         ddb: &DdbFactory,
+        kubectl: &KubectlFactory,
         cancel: CancellationToken,
     ) -> Result<Self, Failure> {
         let cfg = config::load(&config::default_path(vars))?;
@@ -125,6 +126,7 @@ impl App {
         });
         let port = Cached::new(s3(&env, vars), Arc::clone(&cache));
         let ddb = ddb(&env, vars);
+        let kubectl = kubectl(&env, vars);
         let deps = Deps {
             cache,
             env,
@@ -132,6 +134,7 @@ impl App {
             trace: cfg.trace.clone(),
             s3: Some(Arc::new(port)),
             ddb: Some(ddb),
+            kubectl: Some(kubectl),
         };
         let user = ["USER", "LOGNAME"]
             .into_iter()
@@ -210,6 +213,7 @@ async fn pipeline(
         &services.vars,
         &services.s3,
         &services.ddb,
+        &services.kubectl,
         cancel,
     )?;
     cmd::dispatch(cli, &services.registry, &app, io).await

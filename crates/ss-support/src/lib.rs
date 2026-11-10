@@ -10,6 +10,7 @@ mod cli;
 mod cmd;
 mod confirm;
 mod io;
+mod kubectl;
 mod run;
 mod services;
 
@@ -18,4 +19,4 @@ pub use cli::{
 };
 pub use io::{Captured, Io, Sink, Source};
 pub use run::{Exit, run, run_with, run_with_interrupt};
-pub use services::{DdbFactory, S3Factory, Services};
+pub use services::{DdbFactory, KubectlFactory, S3Factory, Services};

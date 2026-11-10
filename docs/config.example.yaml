@@ -1,9 +1,12 @@
 # ss-support configuration — copy to ~/.config/ss-support/config.yaml (or point SS_SUPPORT_CONFIG at it).
 #
 # SAFETY MODEL (DESIGN §8): only environments listed here are eligible for
-# Mutate/Destructive operations, and only when the resolved AWS account ID
-# and kube context match at run time. Anything not listed is read-only.
-# There is no override flag.
+# Mutate/Destructive operations; anything not listed is read-only. There is
+# no override flag. When an environment sets account_id, the AWS caller
+# identity is checked against it before any S3 or DynamoDB call (skipped
+# when a custom endpoint is set). Kubernetes access is read-only (only
+# kubectl get and logs), and every kubectl call is pinned to the
+# environment's kube_context.
 
 default_env: dev
 
@@ -12,7 +15,7 @@ environments:
     profile: acme-dev          # AWS named profile (SSO / assume-role chains resolve via the SDK)
     region: us-west-2
     account_id: "111122223333" # checked against sts:GetCallerIdentity before S3 calls and writes
-    kube_context: dev-cluster  # checked against the current kubectl context before writes
+    kube_context: dev-cluster  # every kubectl call is pinned to this context (--context overrides)
   staging:
     profile: acme-staging
     region: us-west-2

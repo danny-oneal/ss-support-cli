@@ -7,10 +7,12 @@ use std::sync::Arc;
 use ss_core::config::Environment;
 use ss_core::ops::{self, Registry};
 use ss_core::svc::ddb::{self, DdbPort};
+use ss_core::svc::kubectl::KubectlPort;
 use ss_core::svc::s3::{self, S3Port};
 use ss_core::vars::{self, Vars};
 
 use crate::aws;
+use crate::kubectl::{self, Unavailable};
 
 /// Builds the S3 port for the resolved environment and variable snapshot.
 pub type S3Factory = Arc<dyn Fn(&Environment, &Vars) -> Arc<dyn S3Port> + Send + Sync>;
@@ -19,8 +21,12 @@ pub type S3Factory = Arc<dyn Fn(&Environment, &Vars) -> Arc<dyn S3Port> + Send +
 /// snapshot.
 pub type DdbFactory = Arc<dyn Fn(&Environment, &Vars) -> Arc<dyn DdbPort> + Send + Sync>;
 
-/// The registry, variables, and S3 and DynamoDB sources one invocation runs
-/// against.
+/// Builds the Kubernetes port for the resolved environment and variable
+/// snapshot.
+pub type KubectlFactory = Arc<dyn Fn(&Environment, &Vars) -> Arc<dyn KubectlPort> + Send + Sync>;
+
+/// The registry, variables, and S3, DynamoDB, and Kubernetes sources one
+/// invocation runs against.
 #[derive(Clone)]
 pub struct Services {
     /// Every operation the CLI can run.
@@ -31,6 +37,8 @@ pub struct Services {
     pub s3: S3Factory,
     /// Builds the DynamoDB port for the resolved environment.
     pub ddb: DdbFactory,
+    /// Builds the Kubernetes port for the resolved environment.
+    pub kubectl: KubectlFactory,
 }
 
 /// A factory whose port fails every call with "DynamoDB is not configured".
@@ -50,6 +58,7 @@ impl Services {
             vars: vars::process(),
             s3: aws::s3_factory(),
             ddb: aws::ddb_factory(),
+            kubectl: kubectl::factory(),
         }
     }
 
@@ -69,7 +78,14 @@ impl Services {
                 }))
             }),
             ddb: unconfigured_ddb(),
+            kubectl: Arc::new(|_, _| Arc::new(Unavailable::new("Kubernetes is not configured"))),
         }
+    }
+
+    /// These services with every invocation using `port` for Kubernetes.
+    pub fn with_kubectl(mut self, port: Arc<dyn KubectlPort>) -> Self {
+        self.kubectl = Arc::new(move |_, _| Arc::clone(&port));
+        self
     }
 
     /// These services with every invocation using `port` for DynamoDB.
@@ -90,6 +106,7 @@ mod tests {
     use ss_core::{audit, cache, config, preset};
 
     use ss_core::svc::ddb::{FakeDdb, contract};
+    use ss_core::svc::kubectl::FakeKubectl;
 
     use super::*;
 
@@ -118,6 +135,30 @@ mod tests {
             port.list_tables().await.expect("list tables"),
             vec!["tenants".to_owned()]
         );
+    }
+
+    #[tokio::test]
+    async fn isolated_kubectl_is_unconfigured() {
+        let s = services();
+        let port = (s.kubectl)(&Environment::default(), &s.vars);
+        let err = port.list_json("", "pods").await.expect_err("unconfigured");
+        assert!(
+            err.to_string().contains("Kubernetes is not configured"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_kubectl_serves_the_given_port() {
+        let fake = FakeKubectl::new();
+        fake.insert("menu", "configmap", "menu-config", r#"{"data":{}}"#);
+        let s = services().with_kubectl(Arc::new(fake));
+        let port = (s.kubectl)(&Environment::default(), &s.vars);
+        let body = port
+            .get_json("menu", "configmap", "menu-config")
+            .await
+            .expect("get configmap");
+        assert_eq!(body, br#"{"data":{}}"#);
     }
 
     #[test]

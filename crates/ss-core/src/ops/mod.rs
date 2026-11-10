@@ -5,9 +5,11 @@
 
 use std::sync::Arc;
 
+pub mod compare;
 mod confirm;
 pub mod ddb;
 pub mod demo;
+pub mod flow;
 mod input;
 mod operation;
 mod registry;
@@ -27,6 +29,12 @@ pub use view::{Node, OpResult, View};
 /// The registry of every operation that ships with the tool.
 pub fn builtin() -> Registry {
     let mut registry = Registry::new();
+    registry
+        .register(Arc::new(flow::ConfigDrift))
+        .expect("builtin operation ids are unique");
+    registry
+        .register(Arc::new(flow::RecordTrace))
+        .expect("builtin operation ids are unique");
     registry
         .register(Arc::new(demo::Hello))
         .expect("builtin operation ids are unique");
@@ -64,6 +72,8 @@ mod tests {
         assert_eq!(
             ids,
             [
+                "config.drift",
+                "record.trace",
                 "demo.hello",
                 "demo.json-diff",
                 "ddb.gsi-consistency",
