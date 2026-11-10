@@ -49,7 +49,7 @@ impl Services {
             registry: ops::builtin(),
             vars: vars::process(),
             s3: aws::s3_factory(),
-            ddb: unconfigured_ddb(),
+            ddb: aws::ddb_factory(),
         }
     }
 
