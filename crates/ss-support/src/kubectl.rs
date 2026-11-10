@@ -157,16 +157,31 @@ impl KubectlExec {
             return Ok(body);
         }
         let errtext = String::from_utf8_lossy(&errtext);
-        let errtext = errtext.trim();
-        if is_not_found(errtext) {
-            return Err(SvcError::not_found(format!("kubectl {shown}: {errtext}")));
+        let reason = last_line(&errtext).map_or_else(|| exit_description(status), str::to_owned);
+        if is_not_found(&errtext) {
+            return Err(SvcError::not_found(format!("kubectl {shown}: {reason}")));
         }
-        Err(SvcError::Other(if errtext.is_empty() {
-            anyhow!("kubectl {shown}: {}", exit_description(status))
-        } else {
-            anyhow!("kubectl {shown}: {errtext}")
-        }))
+        Err(SvcError::Other(anyhow!("kubectl {shown}: {reason}")))
     }
+}
+
+/// The last non-empty line of kubectl's stderr, trimmed. kubectl prints its
+/// summary last, after any number of log lines, so this keeps an error
+/// message to one line.
+fn last_line(stderr: &str) -> Option<&str> {
+    stderr.lines().rev().map(str::trim).find(|l| !l.is_empty())
+}
+
+/// Refuses a resource, resource name, or pod name that is empty or starts
+/// with `-`, which kubectl would read as a flag and so could override the
+/// pinned context.
+fn check_name(value: &str) -> Result<(), SvcError> {
+    if value.is_empty() || value.starts_with('-') {
+        return Err(SvcError::Other(anyhow!(
+            "refusing kubectl argument {value:?}: names cannot be empty or start with \"-\""
+        )));
+    }
+    Ok(())
 }
 
 /// Whether kubectl's stderr says the resource does not exist.
@@ -246,11 +261,14 @@ impl KubectlPort for KubectlExec {
         resource: &str,
         name: &str,
     ) -> Result<Vec<u8>, SvcError> {
+        check_name(resource)?;
+        check_name(name)?;
         self.run_get(namespace, &["get", resource, name, "-o", "json"])
             .await
     }
 
     async fn list_json(&self, namespace: &str, resource: &str) -> Result<Vec<u8>, SvcError> {
+        check_name(resource)?;
         self.run_get(namespace, &["get", resource, "-o", "json"])
             .await
     }
@@ -261,6 +279,7 @@ impl KubectlPort for KubectlExec {
         pod: &str,
         follow: bool,
     ) -> Result<mpsc::Receiver<String>, SvcError> {
+        check_name(pod)?;
         let tail = LOG_TAIL.to_string();
         let mut rest = vec!["logs", pod, "--tail", tail.as_str()];
         if follow {
@@ -275,7 +294,8 @@ impl KubectlPort for KubectlExec {
 
 /// Forwards kubectl's stdout to `tx` line by line. Returns as soon as the
 /// receiver is gone, which drops `child` and so kills it. When kubectl exits
-/// with a failure and wrote to stderr, the last line sent is `error: {stderr}`.
+/// with a failure and wrote to stderr, the last line sent is `error: {line}`,
+/// where `line` is the last non-empty line of stderr.
 async fn pump_logs(
     mut child: Child,
     stdout: ChildStdout,
@@ -306,10 +326,9 @@ async fn pump_logs(
     let failed = !child.wait().await.is_ok_and(|status| status.success());
     let errtext = errors.await.unwrap_or_default();
     let errtext = String::from_utf8_lossy(&errtext);
-    let errtext = errtext.trim();
-    if failed && !errtext.is_empty() {
+    if let Some(summary) = last_line(&errtext).filter(|_| failed) {
         // The receiver may already be gone; there is nobody left to tell.
-        let _ = tx.send(format!("error: {errtext}")).await;
+        let _ = tx.send(format!("error: {summary}")).await;
     }
 }
 
@@ -502,6 +521,109 @@ mod tests {
         assert!(!err.is_not_found(), "{msg}");
         assert!(msg.starts_with("kubectl get pods -o json: "), "{msg}");
         assert!(msg.contains("Unable to connect"), "{msg}");
+    }
+
+    /// A stub that writes klog noise, then kubectl's summary line, to stderr.
+    const KLOG_THEN_SUMMARY: &str = r#"echo 'E1110 10:00:00.000000   12345 memcache.go:265] couldn'"'"'t get current server API group list: Get "https://10.0.0.1/api?timeout=32s": dial tcp 10.0.0.1:443: i/o timeout' >&2
+echo 'E1110 10:00:32.000000   12345 memcache.go:265] couldn'"'"'t get current server API group list: Get "https://10.0.0.1/api?timeout=32s": dial tcp 10.0.0.1:443: i/o timeout' >&2
+echo 'E1110 10:01:04.000000   12345 memcache.go:265] couldn'"'"'t get current server API group list: Get "https://10.0.0.1/api?timeout=32s": dial tcp 10.0.0.1:443: i/o timeout' >&2
+echo 'Unable to connect to the server: dial tcp 10.0.0.1:443: i/o timeout' >&2
+exit 1"#;
+
+    #[tokio::test]
+    async fn multi_line_stderr_reports_only_its_last_line() {
+        let _serial = serial().await;
+        let dir = TempDir::new().expect("tempdir");
+        let bin = stub(&dir, KLOG_THEN_SUMMARY);
+        let err = exec(&bin)
+            .list_json("", "pods")
+            .await
+            .expect_err("unreachable cluster");
+        assert!(!err.is_not_found(), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "kubectl get pods -o json: Unable to connect to the server: dial tcp 10.0.0.1:443: i/o timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn not_found_on_an_earlier_stderr_line_still_maps_to_not_found() {
+        let _serial = serial().await;
+        let dir = TempDir::new().expect("tempdir");
+        let bin = stub(
+            &dir,
+            r#"echo 'Error from server (NotFound): configmaps "x" not found' >&2; echo 'trailing note' >&2; exit 1"#,
+        );
+        let err = exec(&bin)
+            .get_json("n", "configmap", "x")
+            .await
+            .expect_err("missing resource");
+        assert!(err.is_not_found(), "{err}");
+        assert!(!err.to_string().contains('\n'), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_log_stream_reports_only_the_last_stderr_line() {
+        let _serial = serial().await;
+        let dir = TempDir::new().expect("tempdir");
+        let bin = stub(&dir, KLOG_THEN_SUMMARY);
+        let rx = exec(&bin)
+            .logs("default", "pod-a", false)
+            .await
+            .expect("start stream");
+        assert_eq!(
+            collect(rx).await,
+            ["error: Unable to connect to the server: dial tcp 10.0.0.1:443: i/o timeout"]
+        );
+    }
+
+    #[tokio::test]
+    async fn names_that_are_empty_or_look_like_flags_never_reach_kubectl() {
+        let _serial = serial().await;
+        let dir = TempDir::new().expect("tempdir");
+        let bin = stub(&dir, r#"echo "$@" >> "$0.args"; echo '{}'"#);
+        let port = exec(&bin);
+        let refusal = |value: &str| {
+            format!(
+                r#"refusing kubectl argument "{value}": names cannot be empty or start with "-""#
+            )
+        };
+
+        let err = port
+            .get_json("menu", "configmap", "--context=x")
+            .await
+            .expect_err("flag-like name");
+        assert_eq!(err.to_string(), refusal("--context=x"));
+        assert!(!err.is_not_found());
+        let err = port
+            .get_json("menu", "configmap", "")
+            .await
+            .expect_err("empty name");
+        assert_eq!(err.to_string(), refusal(""));
+        let err = port
+            .get_json("menu", "-o", "x")
+            .await
+            .expect_err("flag-like resource");
+        assert_eq!(err.to_string(), refusal("-o"));
+        let err = port
+            .list_json("menu", "")
+            .await
+            .expect_err("empty resource");
+        assert_eq!(err.to_string(), refusal(""));
+        let err = port
+            .list_json("menu", "--all-namespaces")
+            .await
+            .expect_err("flag-like resource");
+        assert_eq!(err.to_string(), refusal("--all-namespaces"));
+        let err = port
+            .logs("menu", "--context=x", false)
+            .await
+            .expect_err("flag-like pod");
+        assert_eq!(err.to_string(), refusal("--context=x"));
+        let err = port.logs("menu", "", true).await.expect_err("empty pod");
+        assert_eq!(err.to_string(), refusal(""));
+
+        assert!(!sidecar(&bin, ".args").exists(), "kubectl was run");
     }
 
     #[tokio::test]

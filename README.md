@@ -13,7 +13,8 @@ cargo run -p ss-support -- --version
 ```
 
 Crates: `crates/ss-core` (diff engine, operations layer, ports; no AWS
-dependencies) and `crates/ss-support` (the binary: CLI and AWS adapters).
+dependencies) and `crates/ss-support` (the binary: CLI, AWS adapters, and the
+kubectl adapter).
 `make help` lists every target; `docs/` holds the design notes, testing
 plan, and an example config.
 
@@ -33,7 +34,7 @@ Global flags work before or after the subcommand.
 | `--env NAME` | `SS_SUPPORT_ENV`, then `default_env` in the config | writes are refused unless `NAME` is in the config's `environments` |
 | `--profile NAME` | `SS_SUPPORT_PROFILE`, then the environment's `profile` | AWS profile |
 | `--region REGION` | `SS_SUPPORT_REGION`, then the environment's `region` | AWS region |
-| `--context KUBE_CONTEXT` | the environment's `kube_context` | Kubernetes context; every kubectl call is pinned to it, and Kubernetes-backed operations refuse to run without one |
+| `--context KUBE_CONTEXT` | the environment's `kube_context` | Kubernetes context; every kubectl call is pinned to it. Without one, any step that needs Kubernetes fails (exit 1) and kubectl is not started |
 | `-o, --output FORMAT` | `text` | `text` or `json` (`{"views":[...]}`); anything else exits 2 before running |
 | `--export FILE` | | after a successful run, writes a markdown report with the resolved params |
 | `--dry-run` | | stops before the first mutating step; exits 0 |
@@ -50,9 +51,10 @@ Exit codes: `0` ok (including `--dry-run`) · `1` the operation failed, was
 denied, or was declined, or a file could not be read or written · `2` usage
 error (bad flag or param value, including a DynamoDB key that is malformed or
 does not match the table's key, an unknown `record.trace` domain, malformed
-`--vars`, or an ambiguous or unknown ConfigMap data key, unknown operation or
-format, missing required param, unknown preset, nothing to save with
-`--save-preset`) or an unparsable
+`--vars`, missing sort vars, an ambiguous or unknown ConfigMap data key, an
+empty or `-`-leading ConfigMap name, unknown operation or format, missing
+required param, unknown preset, nothing to save with `--save-preset`) or an
+unparsable
 config/presets file · `130` interrupted by Ctrl-C, SIGTERM, or SIGHUP (a second
 signal exits at once). A failed audit-log write is a `warning:` line on stderr
 and does not change the exit code.
@@ -256,10 +258,13 @@ kubectl or put it on PATH)`). Every call is pinned to the environment's
 With neither, the run exits 1 with `no Kubernetes context for environment
 "<env>": set kube_context in config.yaml or pass --context`, and kubectl is
 not started. Only `kubectl get` and `kubectl logs` are ever executed, and
-kubectl output over 32 MiB is refused.
+kubectl output over 32 MiB is refused. Resource, ConfigMap, and pod names that
+are empty or start with `-` are refused before kubectl runs, so a name can
+never act as a kubectl flag. A kubectl failure is reported as one line: the
+last non-empty line of its stderr.
 
 **Exit codes.** A bad domain, malformed `--vars`, missing sort vars, an
-ambiguous or unknown ConfigMap data key, an empty ConfigMap name, or a missing
-required param exits 2. A missing record, S3 object, or ConfigMap, or
+ambiguous or unknown ConfigMap data key, an empty or `-`-leading ConfigMap
+name, or a missing required param exits 2. A missing record, S3 object, or ConfigMap, or
 ConfigMap data that is not JSON, exits 1. Either way there is a single error
 line.

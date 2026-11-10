@@ -113,10 +113,9 @@ fn invalid_configmap(spec: &str, why: String) -> anyhow::Error {
 /// # Errors
 ///
 /// Returns [`RunnerError::InvalidParam`] when the ConfigMap has several data
-/// keys and none was named, the named key is absent, or `spec` has no name;
-/// the port's error when
-/// the fetch fails (including not found); and an error when the ConfigMap
-/// holds no data.
+/// keys and none was named, the named key is absent, `spec` has no name, or
+/// the name starts with `-`; the port's error when the fetch fails (including
+/// not found); and an error when the ConfigMap holds no data.
 pub(crate) async fn configmap_body(
     k8s: &dyn KubectlPort,
     namespace: &str,
@@ -124,6 +123,12 @@ pub(crate) async fn configmap_body(
 ) -> anyhow::Result<(String, String)> {
     let (name, wanted) =
         split_configmap_spec(spec).map_err(|e| invalid_configmap(spec, e.to_string()))?;
+    if name.starts_with('-') {
+        return Err(invalid_configmap(
+            spec,
+            format!("configmap name {name:?} cannot start with \"-\""),
+        ));
+    }
     let raw = k8s.get_json(namespace, "configmap", name).await?;
     let mut data = configmap_data(&raw)?;
     if data.is_empty() {
@@ -303,6 +308,26 @@ mod tests {
             assert_eq!(param, "configmap");
             assert_eq!(value, spec);
         }
+    }
+
+    #[tokio::test]
+    async fn configmap_body_rejects_a_name_that_looks_like_a_flag() {
+        let deps = fixture::deps();
+        let k8s = kube_port(&deps).unwrap();
+        let spec = "--context=prod:menu.json";
+        let err = configmap_body(k8s.as_ref(), "menu", spec)
+            .await
+            .unwrap_err();
+        let Some(RunnerError::InvalidParam { param, value, .. }) = find_cause::<RunnerError>(&err)
+        else {
+            panic!("a ConfigMap name starting with \"-\" is a usage error: {err:#}");
+        };
+        assert_eq!(param, "configmap");
+        assert_eq!(value, spec);
+        assert!(
+            format!("{err:#}").contains(r#"configmap name "--context=prod" cannot start with "-""#),
+            "{err:#}"
+        );
     }
 
     #[tokio::test]

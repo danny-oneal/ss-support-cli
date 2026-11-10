@@ -12,9 +12,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Read-only cross-service operations `config.drift` (an S3 config against a
   live Kubernetes ConfigMap) and `record.trace` (a DynamoDB record followed to
   its S3 config, its previous version, and optionally a live ConfigMap).
-- Kubernetes access through kubectl, pinned to the environment's `kube_context`
-  (or `--context`); without one, Kubernetes-backed operations refuse to run.
-  Only `kubectl get` and `kubectl logs` are ever executed.
+- Kubernetes access through kubectl, with every call pinned to the
+  environment's `kube_context` (or `--context`); without one, any step that
+  needs Kubernetes fails (exit 1) and kubectl is not started. Only
+  `kubectl get` and `kubectl logs` are ever executed. kubectl errors are
+  reported as one line, and resource, ConfigMap, and pod names that are empty
+  or start with `-` are refused.
 
 ## [0.1.0-alpha.3] - 2026-11-10
 

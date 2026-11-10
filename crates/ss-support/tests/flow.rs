@@ -275,6 +275,14 @@ async fn an_unconfigured_kubectl_exits_1() {
     .await;
     assert_eq!(exit, Exit::Failed, "{err}");
     assert!(err.contains("Kubernetes is not configured"), "{err}");
+    let lines: Vec<&str> = err.lines().collect();
+    let [line] = lines.as_slice() else {
+        panic!(
+            "expected exactly one stderr line, got {}: {err}",
+            lines.len()
+        );
+    };
+    assert!(line.starts_with("ss-support run config.drift: "), "{err}");
 }
 
 #[tokio::test]
