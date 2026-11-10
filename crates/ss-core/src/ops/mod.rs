@@ -5,9 +5,11 @@
 
 use std::sync::Arc;
 
+pub mod compare;
 mod confirm;
 pub mod ddb;
 pub mod demo;
+pub mod flow;
 mod input;
 mod operation;
 mod registry;

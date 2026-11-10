@@ -3,23 +3,15 @@
 use async_trait::async_trait;
 
 use super::{port, suggest_buckets, suggest_keys, suggest_versions};
-use crate::diff::{self, Opts};
+use crate::diff::Opts;
 use crate::guard::Class;
-use crate::jsonutil;
+use crate::ops::compare::{Comparison, compare_bodies};
 use crate::ops::{Input, Meta, OpResult, Operation, Param, ParamType, Runner, View};
 
 /// Diffs two versions of one S3 object. Bodies that are not both valid JSON
 /// are compared line by line instead.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VersionDiff;
-
-/// How the two bodies were compared.
-enum Comparison {
-    /// Both bodies parsed; compared structurally.
-    Json(diff::Delta),
-    /// At least one body did not parse; compared line by line.
-    Lines(String),
-}
 
 #[async_trait]
 impl Operation for VersionDiff {
@@ -90,15 +82,7 @@ impl Operation for VersionDiff {
         };
         let comparison = r
             .step("parse and diff", |_| async {
-                Ok(
-                    match (jsonutil::parse(&obj_a.body), jsonutil::parse(&obj_b.body)) {
-                        (Ok(left), Ok(right)) => Comparison::Json(diff::json(&left, &right, &opts)),
-                        _ => Comparison::Lines(diff::text(
-                            &String::from_utf8_lossy(&obj_a.body),
-                            &String::from_utf8_lossy(&obj_b.body),
-                        )),
-                    },
-                )
+                Ok(compare_bodies(&obj_a.body, &obj_b.body, &opts))
             })
             .await?;
 
