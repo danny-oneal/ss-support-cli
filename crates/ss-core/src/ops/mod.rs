@@ -30,6 +30,9 @@ pub use view::{Node, OpResult, View};
 pub fn builtin() -> Registry {
     let mut registry = Registry::new();
     registry
+        .register(Arc::new(flow::ConfigDrift))
+        .expect("builtin operation ids are unique");
+    registry
         .register(Arc::new(demo::Hello))
         .expect("builtin operation ids are unique");
     registry
@@ -66,6 +69,7 @@ mod tests {
         assert_eq!(
             ids,
             [
+                "config.drift",
                 "demo.hello",
                 "demo.json-diff",
                 "ddb.gsi-consistency",

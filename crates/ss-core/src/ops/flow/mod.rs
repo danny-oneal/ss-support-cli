@@ -12,18 +12,17 @@ use crate::jsonutil;
 use crate::svc::kubectl::{KubectlPort, configmap_data};
 use crate::svc::s3::{Version, is_current};
 
+mod drift;
 #[cfg(test)]
 pub(crate) mod fixture;
+
+pub use drift::ConfigDrift;
 
 /// The Kubernetes port of `deps`, or an error when the invocation has none.
 ///
 /// # Errors
 ///
 /// Returns an error when `deps` carries no Kubernetes port.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the cross-service operations")
-)]
 pub(crate) fn kube_port(deps: &Deps) -> anyhow::Result<Arc<dyn KubectlPort>> {
     deps.kubectl
         .clone()
@@ -35,12 +34,6 @@ pub(crate) fn kube_port(deps: &Deps) -> anyhow::Result<Arc<dyn KubectlPort>> {
 /// # Errors
 ///
 /// Returns an error when the name is empty.
-// `allow`, not `expect`: its only non-test caller is `configmap_body`, which is
-// itself unused for now, and compilers differ on whether that counts as used.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "used by the cross-service operations")
-)]
 pub(crate) fn split_configmap_spec(spec: &str) -> anyhow::Result<(&str, Option<&str>)> {
     let (name, key) = match spec.split_once(':') {
         Some((name, key)) => (name, Some(key)),
@@ -129,19 +122,17 @@ fn invalid_configmap(spec: &str, why: String) -> anyhow::Error {
 /// # Errors
 ///
 /// Returns [`RunnerError::InvalidParam`] when the ConfigMap has several data
-/// keys and none was named, or the named key is absent; the port's error when
+/// keys and none was named, the named key is absent, or `spec` has no name;
+/// the port's error when
 /// the fetch fails (including not found); and an error when the ConfigMap
-/// holds no data or `spec` has no name.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the cross-service operations")
-)]
+/// holds no data.
 pub(crate) async fn configmap_body(
     k8s: &dyn KubectlPort,
     namespace: &str,
     spec: &str,
 ) -> anyhow::Result<(String, String)> {
-    let (name, wanted) = split_configmap_spec(spec)?;
+    let (name, wanted) =
+        split_configmap_spec(spec).map_err(|e| invalid_configmap(spec, e.to_string()))?;
     let raw = k8s.get_json(namespace, "configmap", name).await?;
     let mut data = configmap_data(&raw)?;
     if data.is_empty() {
@@ -178,10 +169,6 @@ pub(crate) async fn configmap_body(
 /// # Errors
 ///
 /// Returns an error naming the side that is not valid JSON.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the cross-service operations")
-)]
 pub(crate) fn json_delta(
     s3_body: &[u8],
     data_key: &str,
@@ -300,11 +287,31 @@ mod tests {
         let err = configmap_body(&fakes.kubectl, "menu", "menu-config")
             .await
             .unwrap_err();
-        let Some(RunnerError::InvalidParam { param, .. }) = find_cause::<RunnerError>(&err) else {
+        let Some(RunnerError::InvalidParam { param, value, .. }) = find_cause::<RunnerError>(&err)
+        else {
             panic!("an ambiguous ConfigMap is a usage error: {err:#}");
         };
         assert_eq!(param, "configmap");
+        assert_eq!(value, "menu-config");
         assert!(format!("{err:#}").contains("menu.json, other"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn configmap_body_with_an_empty_name_is_a_usage_error() {
+        let deps = fixture::deps();
+        let k8s = kube_port(&deps).unwrap();
+        for spec in [":x", ""] {
+            let err = configmap_body(k8s.as_ref(), "menu", spec)
+                .await
+                .unwrap_err();
+            let Some(RunnerError::InvalidParam { param, value, .. }) =
+                find_cause::<RunnerError>(&err)
+            else {
+                panic!("an empty ConfigMap name is a usage error: {err:#}");
+            };
+            assert_eq!(param, "configmap");
+            assert_eq!(value, spec);
+        }
     }
 
     #[tokio::test]
