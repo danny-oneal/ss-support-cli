@@ -10,6 +10,7 @@ mod cli;
 mod cmd;
 mod confirm;
 mod io;
+mod kubectl;
 mod run;
 mod services;
 
