@@ -326,6 +326,27 @@ fn query_input(q: &QuerySpec, index: Option<&str>) -> Result<QueryInput, SvcErro
 mod tests {
     use std::collections::HashMap;
 
+    #[test]
+    fn the_adapter_never_calls_a_write_api() {
+        let production = include_str!("ddb.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split yields at least one part");
+        let needles = [
+            concat!("put", "_item"),
+            concat!("update", "_item"),
+            concat!("delete", "_item"),
+            concat!("batch", "_write"),
+            concat!("transact", "_write"),
+        ];
+        for needle in needles {
+            assert!(
+                !production.contains(needle),
+                "the adapter source mentions {needle}"
+            );
+        }
+    }
+
     use aws_sdk_dynamodb::primitives::Blob;
     use aws_sdk_dynamodb::types::{
         AttributeDefinition, AttributeValue, GlobalSecondaryIndexDescription, KeySchemaElement,

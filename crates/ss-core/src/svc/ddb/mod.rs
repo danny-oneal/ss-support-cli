@@ -235,6 +235,62 @@ mod tests {
         assert!(table.index("tierindex").is_none());
     }
 
+    /// A port with exactly the five read methods and nothing else.
+    struct ReadOnly;
+
+    #[async_trait]
+    impl DdbPort for ReadOnly {
+        async fn list_tables(&self) -> Result<Vec<String>, SvcError> {
+            Ok(Vec::new())
+        }
+
+        async fn describe_table(&self, _table: &str) -> Result<TableInfo, SvcError> {
+            Ok(TableInfo::default())
+        }
+
+        async fn get_item(&self, _table: &str, _key: &Key) -> Result<Item, SvcError> {
+            Ok(Item::new())
+        }
+
+        async fn query(&self, _q: &QuerySpec) -> Result<ItemPage, SvcError> {
+            Ok(ItemPage::default())
+        }
+
+        async fn query_index(
+            &self,
+            _table: &str,
+            _index: &str,
+            _q: &QuerySpec,
+        ) -> Result<ItemPage, SvcError> {
+            Ok(ItemPage::default())
+        }
+    }
+
+    #[test]
+    fn the_port_trait_has_no_write_method() {
+        // Compiles only while the trait has no required method beyond the
+        // five reads above.
+        let _port: &dyn DdbPort = &ReadOnly;
+
+        let production = include_str!("mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split yields at least one part");
+        let needles = [
+            concat!("put", "_item"),
+            concat!("update", "_item"),
+            concat!("delete", "_item"),
+            concat!("batch", "_write"),
+            concat!("transact", "_write"),
+        ];
+        for needle in needles {
+            assert!(
+                !production.contains(needle),
+                "the port source mentions {needle}"
+            );
+        }
+    }
+
     #[test]
     fn projection_and_attribute_types_display_the_service_names() {
         assert_eq!(Projection::All.to_string(), "ALL");
