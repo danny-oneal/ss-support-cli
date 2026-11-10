@@ -10,17 +10,25 @@
 use std::io;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use ss_core::config::Environment;
 use ss_core::svc::SvcError;
 use ss_core::svc::kubectl::{KubectlPort, LOG_BUFFER, LOG_TAIL};
+use ss_core::vars::Vars;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::sync::mpsc;
 
+use crate::services::KubectlFactory;
+
 /// The most output one `get` or `list` call may return: 32 MiB.
 pub(crate) const MAX_OUTPUT: usize = 32 << 20;
+
+/// How much of a child's stderr is kept for error messages: the last 64 KiB.
+const STDERR_TAIL: usize = 64 << 10;
 
 /// How [`KubectlExec`] runs kubectl.
 #[derive(Debug, Clone)]
@@ -48,10 +56,6 @@ pub(crate) struct KubectlExec {
     opts: Options,
 }
 
-#[allow(
-    dead_code,
-    reason = "unused until the adapter is wired into the services"
-)]
 impl KubectlExec {
     /// Builds the adapter for `context`. Nothing is run until a call is made.
     pub(crate) fn new(context: impl Into<String>, opts: Options) -> Self {
@@ -142,14 +146,7 @@ impl KubectlExec {
                 body.extend_from_slice(&chunk[..n]);
             }
         };
-        let read_err = async {
-            let mut text = Vec::new();
-            stderr
-                .read_to_end(&mut text)
-                .await
-                .map_err(|e| SvcError::Other(anyhow!("kubectl {shown}: read stderr: {e}")))?;
-            Ok::<_, SvcError>(text)
-        };
+        let read_err = async { Ok::<_, SvcError>(read_tail(&mut stderr, STDERR_TAIL).await) };
         // Either side failing returns at once; dropping `child` then kills it.
         let (body, errtext) = tokio::try_join!(read_out, read_err)?;
         let status = child
@@ -173,24 +170,72 @@ impl KubectlExec {
 }
 
 /// Whether kubectl's stderr says the resource does not exist.
-#[allow(
-    dead_code,
-    reason = "unused until the adapter is wired into the services"
-)]
 fn is_not_found(stderr: &str) -> bool {
     let lower = stderr.to_lowercase();
     lower.contains("notfound") || lower.contains("not found")
 }
 
-#[allow(
-    dead_code,
-    reason = "unused until the adapter is wired into the services"
-)]
+/// How a failed child ended: its exit code, or that a signal ended it.
 fn exit_description(status: std::process::ExitStatus) -> String {
     status.code().map_or_else(
         || "terminated by a signal".to_string(),
         |code| format!("exit status {code}"),
     )
+}
+
+/// A [`KubectlPort`] that cannot reach a cluster: every call fails with the
+/// message it was built with.
+#[derive(Debug, Clone)]
+pub(crate) struct Unavailable {
+    message: String,
+}
+
+impl Unavailable {
+    /// A port whose every call fails with `message`.
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    fn error(&self) -> SvcError {
+        SvcError::Other(anyhow!("{}", self.message))
+    }
+}
+
+#[async_trait]
+impl KubectlPort for Unavailable {
+    async fn get_json(&self, _: &str, _: &str, _: &str) -> Result<Vec<u8>, SvcError> {
+        Err(self.error())
+    }
+
+    async fn list_json(&self, _: &str, _: &str) -> Result<Vec<u8>, SvcError> {
+        Err(self.error())
+    }
+
+    async fn logs(&self, _: &str, _: &str, _: bool) -> Result<mpsc::Receiver<String>, SvcError> {
+        Err(self.error())
+    }
+}
+
+/// The Kubernetes source for real invocations: `kubectl` from `PATH`.
+pub(crate) fn factory() -> KubectlFactory {
+    factory_with(Options::default())
+}
+
+/// A Kubernetes source that runs kubectl as `opts` says. An environment
+/// with no `kube_context` gets a port whose every call fails naming the fix,
+/// so kubectl never falls back to its own current context.
+pub(crate) fn factory_with(opts: Options) -> KubectlFactory {
+    Arc::new(move |env: &Environment, _: &Vars| -> Arc<dyn KubectlPort> {
+        if env.kube_context.is_empty() {
+            return Arc::new(Unavailable::new(format!(
+                "no Kubernetes context for environment {:?}: set kube_context in config.yaml or pass --context",
+                env.name
+            )));
+        }
+        Arc::new(KubectlExec::new(env.kube_context.clone(), opts.clone()))
+    })
 }
 
 #[async_trait]
@@ -231,10 +276,6 @@ impl KubectlPort for KubectlExec {
 /// Forwards kubectl's stdout to `tx` line by line. Returns as soon as the
 /// receiver is gone, which drops `child` and so kills it. When kubectl exits
 /// with a failure and wrote to stderr, the last line sent is `error: {stderr}`.
-#[allow(
-    dead_code,
-    reason = "unused until the adapter is wired into the services"
-)]
 async fn pump_logs(
     mut child: Child,
     stdout: ChildStdout,
@@ -242,7 +283,7 @@ async fn pump_logs(
     tx: mpsc::Sender<String>,
 ) {
     // Drain stderr concurrently so a chatty kubectl never blocks on a full pipe.
-    let errors = tokio::spawn(read_all(stderr));
+    let errors = tokio::spawn(read_tail(stderr, STDERR_TAIL));
     let mut reader = BufReader::new(stdout);
     let mut line = Vec::new();
     loop {
@@ -273,25 +314,29 @@ async fn pump_logs(
 }
 
 /// One log line without its line terminator; invalid UTF-8 is replaced.
-#[allow(
-    dead_code,
-    reason = "unused until the adapter is wired into the services"
-)]
 fn line_text(raw: &[u8]) -> String {
     let raw = raw.strip_suffix(b"\n").unwrap_or(raw);
     let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
     String::from_utf8_lossy(raw).into_owned()
 }
 
-#[allow(
-    dead_code,
-    reason = "unused until the adapter is wired into the services"
-)]
-async fn read_all(mut reader: impl AsyncRead + Unpin) -> Vec<u8> {
-    let mut out = Vec::new();
-    // A read failure just truncates the message.
-    let _ = reader.read_to_end(&mut out).await;
-    out
+/// Reads `reader` to its end and returns only the last `cap` bytes, so a
+/// chatty process cannot grow memory without bound. A read failure ends the
+/// read early and keeps what arrived.
+async fn read_tail(mut reader: impl AsyncRead + Unpin, cap: usize) -> Vec<u8> {
+    let mut tail = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => return tail,
+            Ok(n) => {
+                tail.extend_from_slice(&chunk[..n]);
+                if tail.len() > cap {
+                    tail.drain(..tail.len() - cap);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -300,6 +345,8 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use ss_core::config::Environment;
+    use ss_core::vars::Vars;
     use tempfile::TempDir;
 
     /// Held for a whole test. Writing a script while another test forks a
@@ -359,12 +406,12 @@ mod tests {
 
     async fn assert_gone(pid: &str) {
         for _ in 0..100 {
-            let alive = tokio::process::Command::new("kill")
-                .args(["-0", pid])
+            let alive = tokio::process::Command::new("sh")
+                .args(["-c", &format!("kill -0 {pid}")])
                 .stderr(std::process::Stdio::null())
                 .status()
                 .await
-                .expect("run kill")
+                .expect("run sh")
                 .success();
             if !alive {
                 return;
@@ -471,6 +518,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_binary_is_actionable() {
+        let _serial = serial().await;
         let err = exec(Path::new("/nonexistent/kubectl"))
             .list_json("", "pods")
             .await
@@ -553,6 +601,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_log_stream_that_cannot_start_reports_why() {
+        let _serial = serial().await;
         let err = exec(Path::new("/nonexistent/kubectl"))
             .logs("default", "pod-a", false)
             .await
@@ -564,9 +613,11 @@ mod tests {
     async fn dropping_the_receiver_stops_the_log_stream() {
         let _serial = serial().await;
         let dir = TempDir::new().expect("tempdir");
+        // Ignoring SIGPIPE means a write to the closed pipe cannot end the
+        // stub, so only the adapter killing it can.
         let bin = stub(
             &dir,
-            r#"echo $$ > "$0.pid"; while true; do echo tick; sleep 0.05; done"#,
+            r#"trap '' PIPE; echo $$ > "$0.pid"; while true; do echo tick; sleep 0.05; done"#,
         );
         let mut rx = exec(&bin)
             .logs("default", "pod-a", true)
@@ -576,6 +627,123 @@ mod tests {
         let pid = pid_of(&bin).await;
         drop(rx);
         assert_gone(&pid).await;
+    }
+
+    /// A script that writes a marked first line, over 64 KiB of filler, and a
+    /// marked last line to stderr, then fails.
+    const CHATTY_FAILURE: &str = r#"echo FIRST-LINE-MARKER >&2
+i=0
+while [ $i -lt 2000 ]; do
+  echo "filler-$i-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" >&2
+  i=$((i+1))
+done
+echo LAST-LINE-MARKER >&2
+exit 1"#;
+
+    #[tokio::test]
+    async fn a_chatty_stderr_keeps_only_its_tail() {
+        let _serial = serial().await;
+        let dir = TempDir::new().expect("tempdir");
+        let bin = stub(&dir, CHATTY_FAILURE);
+        let err = exec(&bin)
+            .list_json("", "pods")
+            .await
+            .expect_err("failed exit");
+        let msg = err.to_string();
+        assert!(msg.ends_with("LAST-LINE-MARKER"), "{}", tail_of(&msg));
+        assert!(!msg.contains("FIRST-LINE-MARKER"));
+        assert!(msg.len() <= STDERR_TAIL + 64, "{} bytes", msg.len());
+    }
+
+    #[tokio::test]
+    async fn a_chatty_log_stderr_keeps_only_its_tail() {
+        let _serial = serial().await;
+        let dir = TempDir::new().expect("tempdir");
+        let bin = stub(&dir, CHATTY_FAILURE);
+        let rx = exec(&bin)
+            .logs("default", "pod-a", false)
+            .await
+            .expect("start stream");
+        let lines = collect(rx).await;
+        let [line] = lines.as_slice() else {
+            panic!("expected one error line, got {} lines", lines.len());
+        };
+        assert!(line.starts_with("error: "), "{}", tail_of(line));
+        assert!(line.ends_with("LAST-LINE-MARKER"), "{}", tail_of(line));
+        assert!(!line.contains("FIRST-LINE-MARKER"));
+        assert!(line.len() <= STDERR_TAIL + 64, "{} bytes", line.len());
+    }
+
+    fn tail_of(text: &str) -> &str {
+        let mut start = text.len().saturating_sub(80);
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        &text[start..]
+    }
+
+    fn env(name: &str, context: &str) -> Environment {
+        Environment {
+            name: name.to_owned(),
+            kube_context: context.to_owned(),
+            ..Environment::default()
+        }
+    }
+
+    fn stub_options(binary: &Path) -> Options {
+        Options {
+            binary: binary.to_path_buf(),
+            ..Options::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn no_context_refuses_without_running_kubectl() {
+        let _serial = serial().await;
+        let dir = TempDir::new().expect("tempdir");
+        let bin = stub(&dir, r#"echo "$@" >> "$0.args"; echo '{}'"#);
+        let port = factory_with(stub_options(&bin))(&env("dev", ""), &Vars::new());
+        let err = port
+            .get_json("menu", "configmap", "menu-config")
+            .await
+            .expect_err("no context");
+        assert_eq!(
+            err.to_string(),
+            r#"no Kubernetes context for environment "dev": set kube_context in config.yaml or pass --context"#
+        );
+        assert!(!sidecar(&bin, ".args").exists(), "kubectl was run");
+    }
+
+    #[tokio::test]
+    async fn a_configured_context_is_passed_to_every_call() {
+        let _serial = serial().await;
+        let dir = TempDir::new().expect("tempdir");
+        let bin = stub(&dir, r#"echo "$@" >> "$0.args"; echo '{}'"#);
+        let port = factory_with(stub_options(&bin))(&env("dev", "dev-cluster"), &Vars::new());
+        port.get_json("menu", "configmap", "menu-config")
+            .await
+            .expect("get");
+        port.list_json("menu", "pods").await.expect("list");
+        let rx = port.logs("menu", "pod-a", false).await.expect("logs");
+        collect(rx).await;
+        let calls = std::fs::read_to_string(sidecar(&bin, ".args")).expect("recorded");
+        assert_eq!(calls.lines().count(), 3, "{calls}");
+        for line in calls.lines() {
+            assert!(line.starts_with("--context dev-cluster "), "{line}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_port_fails_every_call() {
+        let port = Unavailable::new("nope");
+        for err in [
+            port.get_json("", "pods", "p").await.expect_err("get"),
+            port.list_json("", "pods").await.expect_err("list"),
+            port.logs("", "p", false).await.expect_err("logs"),
+        ] {
+            assert_eq!(err.to_string(), "nope");
+            assert!(!err.is_not_found());
+        }
     }
 
     #[tokio::test]

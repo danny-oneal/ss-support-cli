@@ -12,6 +12,7 @@ use crate::cache::{self, Store};
 use crate::config::{DiffDefaults, Environment, TraceConfig};
 use crate::guard::Class;
 use crate::svc::ddb::DdbPort;
+use crate::svc::kubectl::KubectlPort;
 use crate::svc::s3::S3Port;
 
 use super::{Input, OpResult, Runner};
@@ -199,6 +200,8 @@ pub struct Deps {
     pub s3: Option<Arc<dyn S3Port>>,
     /// The DynamoDB port, when this invocation has one.
     pub ddb: Option<Arc<dyn DdbPort>>,
+    /// The Kubernetes port, when this invocation has one.
+    pub kubectl: Option<Arc<dyn KubectlPort>>,
 }
 
 impl Default for Deps {
@@ -210,6 +213,7 @@ impl Default for Deps {
             trace: TraceConfig::default(),
             s3: None,
             ddb: None,
+            kubectl: None,
         }
     }
 }
@@ -233,6 +237,11 @@ mod tests {
     #[test]
     fn default_deps_have_no_ddb_port() {
         assert!(Deps::default().ddb.is_none());
+    }
+
+    #[test]
+    fn default_deps_have_no_kubectl() {
+        assert!(Deps::default().kubectl.is_none());
     }
 
     #[test]
