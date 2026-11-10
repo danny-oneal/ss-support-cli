@@ -16,14 +16,14 @@ use self::s3::{AwsS3, Options};
 
 /// The S3 source for real invocations. Nothing touches AWS until the first
 /// S3 call: the port loads the SDK configuration then. With
-/// `SS_S3_ENDPOINT` set the port talks to that S3-compatible endpoint and
+/// `SS_SUPPORT_S3_ENDPOINT` set the port talks to that S3-compatible endpoint and
 /// skips the identity and account checks, resolving credentials only;
 /// otherwise it verifies the caller's account against the environment first.
 /// Either way, a credential failure names the command that fixes it.
 pub(crate) fn s3_factory() -> S3Factory {
     Arc::new(|env: &Environment, vars: &vars::Vars| {
         let env = env.clone();
-        let endpoint = vars::get(vars, "SS_S3_ENDPOINT").map(str::to_owned);
+        let endpoint = vars::get(vars, "SS_SUPPORT_S3_ENDPOINT").map(str::to_owned);
         let profile = effective_profile(&env, vars);
         Arc::new(Lazy::new(move || {
             let env = env.clone();

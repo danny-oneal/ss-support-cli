@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ss-core", "crates/ss"]
+members = ["crates/ss-core", "crates/ss-support"]
 
 # One version for both crates, released together.
 [workspace.package]

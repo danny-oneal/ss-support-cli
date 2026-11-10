@@ -1,4 +1,4 @@
-//! In-process end-to-end tests: drive `ss::run_with` the way `main` does,
+//! In-process end-to-end tests: drive `ss_support::run_with` the way `main` does,
 //! asserting on the exit code and the captured output.
 
 use std::fs;
@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::CommandFactory;
-use ss::{Cli, Exit, Io, Services, Sink, Source};
 use ss_core::guard::Class;
 use ss_core::ops::{Input, Meta, OpResult, Operation, Param, Runner, View};
+use ss_support::{Cli, Exit, Io, Services, Sink, Source};
 
 /// Runs `args` against an isolated home under `root` with empty stdin,
 /// returning the exit status and the captured stdout and stderr.
@@ -25,12 +25,12 @@ async fn ss(root: &Path, args: &[&str]) -> (Exit, String, String) {
 async fn ss_with(services: Services, args: &[&str]) -> (Exit, String, String) {
     let cli = parse(&services, args);
     let (io, captured) = Io::capture("");
-    let exit = ss::run_with(cli, services, io).await;
+    let exit = ss_support::run_with(cli, services, io).await;
     (exit, captured.stdout(), captured.stderr())
 }
 
 fn parse(services: &Services, args: &[&str]) -> Cli {
-    ss::parse_from(&services.registry, args.iter().copied())
+    ss_support::parse_from(&services.registry, args.iter().copied())
         .unwrap_or_else(|e| panic!("parse {args:?}: {e}"))
 }
 
@@ -62,23 +62,23 @@ fn exit_codes_are_distinct_and_stable() {
 #[test]
 fn version_is_the_workspace_version() {
     let cmd = Cli::command();
-    assert_eq!(cmd.get_name(), "ss");
+    assert_eq!(cmd.get_name(), "ss-support");
     assert_eq!(cmd.get_version(), Some(env!("CARGO_PKG_VERSION")));
 }
 
 #[tokio::test]
 async fn bare_invocation_prints_help() {
     let root = tempfile::tempdir().expect("tempdir");
-    let (exit, out, err) = ss(root.path(), &["ss"]).await;
+    let (exit, out, err) = ss(root.path(), &["ss-support"]).await;
     assert_eq!(exit, Exit::Ok);
-    assert!(out.contains("Usage: ss"), "{out}");
+    assert!(out.contains("Usage: ss-support"), "{out}");
     assert_eq!(err, "");
 }
 
 #[tokio::test]
 async fn ops_list_shows_every_operation() {
     let root = tempfile::tempdir().expect("tempdir");
-    let (exit, out, err) = ss(root.path(), &["ss", "ops", "list"]).await;
+    let (exit, out, err) = ss(root.path(), &["ss-support", "ops", "list"]).await;
     assert_eq!(exit, Exit::Ok, "{err}");
     assert!(
         out.lines().next().is_some_and(|l| l.starts_with("ID")),
@@ -92,7 +92,11 @@ async fn ops_list_shows_every_operation() {
 #[tokio::test]
 async fn ops_describe_lists_params() {
     let root = tempfile::tempdir().expect("tempdir");
-    let (exit, out, err) = ss(root.path(), &["ss", "ops", "describe", "demo.hello"]).await;
+    let (exit, out, err) = ss(
+        root.path(),
+        &["ss-support", "ops", "describe", "demo.hello"],
+    )
+    .await;
     assert_eq!(exit, Exit::Ok, "{err}");
     for want in [
         "ID       : demo.hello",
@@ -110,11 +114,11 @@ async fn ops_describe_lists_params() {
 #[tokio::test]
 async fn ops_describe_unknown_is_usage() {
     let root = tempfile::tempdir().expect("tempdir");
-    let (exit, out, err) = ss(root.path(), &["ss", "ops", "describe", "nope"]).await;
+    let (exit, out, err) = ss(root.path(), &["ss-support", "ops", "describe", "nope"]).await;
     assert_eq!(exit, Exit::Usage);
     assert_eq!(
         err,
-        "ss ops describe: unknown operation \"nope\" (try `ss ops list`)\n"
+        "ss-support ops describe: unknown operation \"nope\" (try `ss-support ops list`)\n"
     );
     assert_eq!(out, "");
 }
@@ -122,10 +126,13 @@ async fn ops_describe_unknown_is_usage() {
 #[tokio::test]
 async fn config_typo_exits_2_naming_the_key() {
     let root = tempfile::tempdir().expect("tempdir");
-    write(root.path(), ".config/ss/config.yaml", "envs: {}\n");
-    let (exit, out, err) = ss(root.path(), &["ss", "ops", "list"]).await;
+    write(root.path(), ".config/ss-support/config.yaml", "envs: {}\n");
+    let (exit, out, err) = ss(root.path(), &["ss-support", "ops", "list"]).await;
     assert_eq!(exit, Exit::Usage);
-    assert!(err.starts_with("ss ops list: parse config "), "{err}");
+    assert!(
+        err.starts_with("ss-support ops list: parse config "),
+        "{err}"
+    );
     assert!(err.contains("unknown field `envs`"), "{err}");
     assert_eq!(err.lines().count(), 1, "{err}");
     assert_eq!(out, "");
@@ -136,54 +143,79 @@ async fn presets_list_show_delete() {
     let root = tempfile::tempdir().expect("tempdir");
     write(
         root.path(),
-        ".config/ss/presets.yaml",
+        ".config/ss-support/presets.yaml",
         "presets:\n  demo.hello:\n    w:\n      name: world\n",
     );
 
-    let (exit, out, err) = ss(root.path(), &["ss", "presets", "list"]).await;
+    let (exit, out, err) = ss(root.path(), &["ss-support", "presets", "list"]).await;
     assert_eq!(exit, Exit::Ok, "{err}");
     assert!(out.contains("demo.hello") && out.contains('w'), "{out}");
 
-    let (exit, out, err) = ss(root.path(), &["ss", "presets", "show", "demo.hello", "w"]).await;
+    let (exit, out, err) = ss(
+        root.path(),
+        &["ss-support", "presets", "show", "demo.hello", "w"],
+    )
+    .await;
     assert_eq!(exit, Exit::Ok, "{err}");
     assert!(out.contains("--name : world"), "{out}");
 
     let (exit, _, err) = ss(
         root.path(),
-        &["ss", "presets", "show", "demo.hello", "nope"],
+        &["ss-support", "presets", "show", "demo.hello", "nope"],
     )
     .await;
     assert_eq!(exit, Exit::Usage);
-    assert_eq!(err, "ss presets show: demo.hello has no preset \"nope\"\n");
+    assert_eq!(
+        err,
+        "ss-support presets show: demo.hello has no preset \"nope\"\n"
+    );
 
-    let (exit, out, err) = ss(root.path(), &["ss", "presets", "delete", "demo.hello", "w"]).await;
+    let (exit, out, err) = ss(
+        root.path(),
+        &["ss-support", "presets", "delete", "demo.hello", "w"],
+    )
+    .await;
     assert_eq!(exit, Exit::Ok, "{err}");
     assert_eq!(out, "deleted preset \"w\" for demo.hello\n");
 
-    let (exit, out, err) = ss(root.path(), &["ss", "presets", "list"]).await;
+    let (exit, out, err) = ss(root.path(), &["ss-support", "presets", "list"]).await;
     assert_eq!(exit, Exit::Ok, "{err}");
     assert_eq!(
         out,
-        "no presets saved yet — use `ss run <op> ... --save-preset <name>`\n"
+        "no presets saved yet — use `ss-support run <op> ... --save-preset <name>`\n"
     );
 }
 
 #[tokio::test]
 async fn unparsable_presets_file_is_usage() {
     let root = tempfile::tempdir().expect("tempdir");
-    write(root.path(), ".config/ss/presets.yaml", "presets: [\n");
-    let (exit, out, err) = ss(root.path(), &["ss", "presets", "list"]).await;
+    write(
+        root.path(),
+        ".config/ss-support/presets.yaml",
+        "presets: [\n",
+    );
+    let (exit, out, err) = ss(root.path(), &["ss-support", "presets", "list"]).await;
     assert_eq!(exit, Exit::Usage);
-    assert!(err.starts_with("ss presets list: parse presets "), "{err}");
+    assert!(
+        err.starts_with("ss-support presets list: parse presets "),
+        "{err}"
+    );
     assert_eq!(out, "");
 }
 
 #[tokio::test]
 async fn deleting_a_missing_preset_is_usage() {
     let root = tempfile::tempdir().expect("tempdir");
-    let (exit, _, err) = ss(root.path(), &["ss", "presets", "delete", "demo.hello", "w"]).await;
+    let (exit, _, err) = ss(
+        root.path(),
+        &["ss-support", "presets", "delete", "demo.hello", "w"],
+    )
+    .await;
     assert_eq!(exit, Exit::Usage);
-    assert_eq!(err, "ss presets delete: demo.hello has no preset \"w\"\n");
+    assert_eq!(
+        err,
+        "ss-support presets delete: demo.hello has no preset \"w\"\n"
+    );
 }
 
 #[tokio::test]
@@ -200,8 +232,16 @@ async fn closed_stdout_exits_0() {
     let (root, a, b) = diff_fixtures();
     let services = Services::isolated(root.path());
     for args in [
-        &["ss", "ops", "list"][..],
-        &["ss", "run", "demo.json-diff", "--left", &a, "--right", &b],
+        &["ss-support", "ops", "list"][..],
+        &[
+            "ss-support",
+            "run",
+            "demo.json-diff",
+            "--left",
+            &a,
+            "--right",
+            &b,
+        ],
     ] {
         let cli = parse(&services, args);
         let (io, captured) = Io::capture("");
@@ -209,7 +249,7 @@ async fn closed_stdout_exits_0() {
             stdout: Sink::new(ClosedPipe),
             ..io
         };
-        let exit = ss::run_with(cli, services.clone(), io).await;
+        let exit = ss_support::run_with(cli, services.clone(), io).await;
         assert_eq!(exit, Exit::Ok, "{args:?}");
         assert_eq!(captured.stderr(), "", "{args:?}");
     }
@@ -220,7 +260,15 @@ async fn run_json_diff_text() {
     let (root, a, b) = diff_fixtures();
     let (exit, out, err) = ss(
         root.path(),
-        &["ss", "run", "demo.json-diff", "--left", &a, "--right", &b],
+        &[
+            "ss-support",
+            "run",
+            "demo.json-diff",
+            "--left",
+            &a,
+            "--right",
+            &b,
+        ],
     )
     .await;
     assert_eq!(exit, Exit::Ok, "{err}");
@@ -235,7 +283,7 @@ async fn run_json_diff_json() {
     let (exit, out, err) = ss(
         root.path(),
         &[
-            "ss",
+            "ss-support",
             "run",
             "demo.json-diff",
             "--left",
@@ -264,7 +312,7 @@ async fn unknown_output_format_is_usage_before_running() {
     let (exit, out, err) = ss(
         root.path(),
         &[
-            "ss",
+            "ss-support",
             "run",
             "demo.json-diff",
             "--left",
@@ -281,7 +329,7 @@ async fn unknown_output_format_is_usage_before_running() {
     assert_eq!(exit, Exit::Usage);
     assert_eq!(
         err,
-        "ss run demo.json-diff: unknown output format \"xml\" (want text or json)\n"
+        "ss-support run demo.json-diff: unknown output format \"xml\" (want text or json)\n"
     );
     assert_eq!(out, "");
     assert!(!report.exists());
@@ -290,11 +338,15 @@ async fn unknown_output_format_is_usage_before_running() {
 #[tokio::test]
 async fn missing_required_param_is_usage() {
     let (root, a, _) = diff_fixtures();
-    let (exit, out, err) = ss(root.path(), &["ss", "run", "demo.json-diff", "--left", &a]).await;
+    let (exit, out, err) = ss(
+        root.path(),
+        &["ss-support", "run", "demo.json-diff", "--left", &a],
+    )
+    .await;
     assert_eq!(exit, Exit::Usage);
     assert_eq!(
         err,
-        "ss run demo.json-diff: required param \"right\" missing\n"
+        "ss-support run demo.json-diff: required param \"right\" missing\n"
     );
     assert_eq!(out, "");
 }
@@ -306,7 +358,7 @@ async fn step_failure_exits_1() {
     let (exit, out, err) = ss(
         root.path(),
         &[
-            "ss",
+            "ss-support",
             "run",
             "demo.json-diff",
             "--left",
@@ -318,7 +370,7 @@ async fn step_failure_exits_1() {
     .await;
     assert_eq!(exit, Exit::Failed);
     assert!(
-        err.starts_with("ss run demo.json-diff: read both files: open "),
+        err.starts_with("ss-support run demo.json-diff: read both files: open "),
         "{err}"
     );
     assert_eq!(err.lines().count(), 1, "{err}");
@@ -331,7 +383,7 @@ async fn dry_run_on_a_read_op_runs_normally() {
     let (exit, out, err) = ss(
         root.path(),
         &[
-            "ss",
+            "ss-support",
             "run",
             "demo.json-diff",
             "--left",
@@ -354,7 +406,7 @@ async fn export_writes_markdown() {
     let (exit, _, err) = ss(
         root.path(),
         &[
-            "ss",
+            "ss-support",
             "run",
             "demo.json-diff",
             "--left",
@@ -381,7 +433,7 @@ async fn export_failure_exits_1() {
     let (exit, out, err) = ss(
         root.path(),
         &[
-            "ss",
+            "ss-support",
             "run",
             "demo.json-diff",
             "--left",
@@ -396,7 +448,9 @@ async fn export_failure_exits_1() {
     assert_eq!(exit, Exit::Failed);
     assert!(out.contains("~ a: 1 -> 2"), "{out}");
     assert!(
-        err.starts_with(&format!("ss run demo.json-diff: export {report_arg}: ")),
+        err.starts_with(&format!(
+            "ss-support run demo.json-diff: export {report_arg}: "
+        )),
         "{err}"
     );
 }
@@ -407,7 +461,7 @@ async fn save_and_replay_preset() {
     let (exit, saved_out, err) = ss(
         root.path(),
         &[
-            "ss",
+            "ss-support",
             "run",
             "demo.json-diff",
             "--left",
@@ -424,14 +478,14 @@ async fn save_and_replay_preset() {
         err.contains("saved preset \"p\" for demo.json-diff"),
         "{err}"
     );
-    let presets =
-        fs::read_to_string(root.path().join(".config/ss/presets.yaml")).expect("presets file");
+    let presets = fs::read_to_string(root.path().join(".config/ss-support/presets.yaml"))
+        .expect("presets file");
     assert!(presets.contains("left"), "{presets}");
     assert!(!presets.contains("tolerance"), "{presets}");
 
     let (exit, out, err) = ss(
         root.path(),
-        &["ss", "run", "demo.json-diff", "--preset", "p"],
+        &["ss-support", "run", "demo.json-diff", "--preset", "p"],
     )
     .await;
     assert_eq!(exit, Exit::Ok, "{err}");
@@ -439,13 +493,13 @@ async fn save_and_replay_preset() {
 
     let (exit, out, err) = ss(
         root.path(),
-        &["ss", "run", "demo.json-diff", "--preset", "nope"],
+        &["ss-support", "run", "demo.json-diff", "--preset", "nope"],
     )
     .await;
     assert_eq!(exit, Exit::Usage);
     assert_eq!(
         err,
-        "ss run demo.json-diff: no preset \"nope\" for demo.json-diff (have: p); save one with --save-preset\n"
+        "ss-support run demo.json-diff: no preset \"nope\" for demo.json-diff (have: p); save one with --save-preset\n"
     );
     assert_eq!(out, "");
 }
@@ -455,12 +509,20 @@ async fn explicit_flags_override_the_preset() {
     let (root, a, b) = diff_fixtures();
     write(
         root.path(),
-        ".config/ss/presets.yaml",
+        ".config/ss-support/presets.yaml",
         &format!("presets:\n  demo.json-diff:\n    p:\n      left: {b}\n      right: {b}\n"),
     );
     let (exit, out, err) = ss(
         root.path(),
-        &["ss", "run", "demo.json-diff", "--preset", "p", "--left", &a],
+        &[
+            "ss-support",
+            "run",
+            "demo.json-diff",
+            "--preset",
+            "p",
+            "--left",
+            &a,
+        ],
     )
     .await;
     assert_eq!(exit, Exit::Ok, "{err}");
@@ -470,11 +532,15 @@ async fn explicit_flags_override_the_preset() {
 #[tokio::test]
 async fn unknown_preset_with_none_saved_is_usage() {
     let root = tempfile::tempdir().expect("tempdir");
-    let (exit, _, err) = ss(root.path(), &["ss", "run", "demo.hello", "--preset", "p"]).await;
+    let (exit, _, err) = ss(
+        root.path(),
+        &["ss-support", "run", "demo.hello", "--preset", "p"],
+    )
+    .await;
     assert_eq!(exit, Exit::Usage);
     assert_eq!(
         err,
-        "ss run demo.hello: no preset \"p\" for demo.hello (none saved); save one with --save-preset\n"
+        "ss-support run demo.hello: no preset \"p\" for demo.hello (none saved); save one with --save-preset\n"
     );
 }
 
@@ -483,7 +549,7 @@ async fn env_flows_into_the_operation() {
     let root = tempfile::tempdir().expect("tempdir");
     write(
         root.path(),
-        ".config/ss/config.yaml",
+        ".config/ss-support/config.yaml",
         "environments:\n  dev:\n    profile: p-dev\n",
     );
     let environment = |out: &str| {
@@ -494,7 +560,7 @@ async fn env_flows_into_the_operation() {
     let (exit, out, err) = ss(
         root.path(),
         &[
-            "ss",
+            "ss-support",
             "run",
             "demo.hello",
             "--name",
@@ -510,10 +576,20 @@ async fn env_flows_into_the_operation() {
     assert_eq!(environment(&out), "dev");
 
     let mut services = Services::isolated(root.path());
-    services.vars.insert("SS_ENV".to_owned(), "dev".to_owned());
+    services
+        .vars
+        .insert("SS_SUPPORT_ENV".to_owned(), "dev".to_owned());
     let (exit, out, err) = ss_with(
         services,
-        &["ss", "run", "demo.hello", "--name", "x", "-o", "json"],
+        &[
+            "ss-support",
+            "run",
+            "demo.hello",
+            "--name",
+            "x",
+            "-o",
+            "json",
+        ],
     )
     .await;
     assert_eq!(exit, Exit::Ok, "{err}");
@@ -525,7 +601,7 @@ async fn verbose_prints_progress() {
     let root = tempfile::tempdir().expect("tempdir");
     let (exit, _, err) = ss(
         root.path(),
-        &["ss", "run", "demo.hello", "--name", "x", "-v"],
+        &["ss-support", "run", "demo.hello", "--name", "x", "-v"],
     )
     .await;
     assert_eq!(exit, Exit::Ok, "{err}");
@@ -538,9 +614,12 @@ async fn verbose_prints_progress() {
 async fn ctrl_c_mid_run_exits_130() {
     let root = tempfile::tempdir().expect("tempdir");
     let services = Services::isolated(root.path());
-    let cli = parse(&services, &["ss", "run", "demo.hello", "--name", "x"]);
+    let cli = parse(
+        &services,
+        &["ss-support", "run", "demo.hello", "--name", "x"],
+    );
     let (io, captured) = Io::capture("");
-    let exit = ss::run_with_interrupt(
+    let exit = ss_support::run_with_interrupt(
         cli,
         services,
         io,
@@ -550,7 +629,7 @@ async fn ctrl_c_mid_run_exits_130() {
     assert_eq!(exit, Exit::Interrupted);
     assert_eq!(
         captured.stderr(),
-        "ss run demo.hello: compose greeting: cancelled\n"
+        "ss-support run demo.hello: compose greeting: cancelled\n"
     );
     assert_eq!(captured.stdout(), "");
 }
@@ -588,7 +667,11 @@ impl Operation for Touch {
 /// Isolated services under `root` whose registry also holds [`Touch`], with
 /// `dev` allowlisted; returns the services and Touch's run counter.
 fn touch_services(root: &Path) -> (Services, Arc<AtomicUsize>) {
-    write(root, ".config/ss/config.yaml", "environments:\n  dev: {}\n");
+    write(
+        root,
+        ".config/ss-support/config.yaml",
+        "environments:\n  dev: {}\n",
+    );
     let runs = Arc::new(AtomicUsize::new(0));
     let mut services = Services::isolated(root);
     services
@@ -616,7 +699,7 @@ async fn bad_op_param_value_is_usage() {
     let (exit, out, err) = ss(
         root.path(),
         &[
-            "ss",
+            "ss-support",
             "run",
             "demo.json-diff",
             "--left",
@@ -631,7 +714,7 @@ async fn bad_op_param_value_is_usage() {
     assert_eq!(exit, Exit::Usage);
     assert_eq!(
         err,
-        "ss run demo.json-diff: invalid tolerance \"abc\": invalid float literal\n"
+        "ss-support run demo.json-diff: invalid tolerance \"abc\": invalid float literal\n"
     );
     assert_eq!(out, "");
 }
@@ -640,12 +723,16 @@ async fn bad_op_param_value_is_usage() {
 async fn unreadable_config_exits_1() {
     let root = tempfile::tempdir().expect("tempdir");
     let mut services = Services::isolated(root.path());
-    services
-        .vars
-        .insert("SS_CONFIG".to_owned(), root.path().display().to_string());
-    let (exit, out, err) = ss_with(services, &["ss", "ops", "list"]).await;
+    services.vars.insert(
+        "SS_SUPPORT_CONFIG".to_owned(),
+        root.path().display().to_string(),
+    );
+    let (exit, out, err) = ss_with(services, &["ss-support", "ops", "list"]).await;
     assert_eq!(exit, Exit::Failed);
-    assert!(err.starts_with("ss ops list: read config "), "{err}");
+    assert!(
+        err.starts_with("ss-support ops list: read config "),
+        "{err}"
+    );
     assert_eq!(err.lines().count(), 1, "{err}");
     assert_eq!(out, "");
 }
@@ -657,7 +744,7 @@ async fn save_preset_without_params_is_usage_before_running() {
     let (exit, out, err) = ss_with(
         services,
         &[
-            "ss",
+            "ss-support",
             "run",
             "test.touch",
             "--env",
@@ -669,22 +756,34 @@ async fn save_preset_without_params_is_usage_before_running() {
     )
     .await;
     assert_eq!(exit, Exit::Usage);
-    assert_eq!(err, "ss run test.touch: refusing to save an empty preset\n");
+    assert_eq!(
+        err,
+        "ss-support run test.touch: refusing to save an empty preset\n"
+    );
     assert_eq!(out, "");
     assert_eq!(runs.load(Ordering::SeqCst), 0);
-    assert!(!root.path().join(".local/state/ss/audit.log").exists());
-    assert!(!root.path().join(".config/ss/presets.yaml").exists());
+    assert!(
+        !root
+            .path()
+            .join(".local/state/ss-support/audit.log")
+            .exists()
+    );
+    assert!(!root.path().join(".config/ss-support/presets.yaml").exists());
 }
 
 #[tokio::test]
 async fn eof_at_the_prompt_ends_the_prompt_line() {
     let root = tempfile::tempdir().expect("tempdir");
     let (services, _) = touch_services(root.path());
-    let (exit, out, err) = ss_with(services, &["ss", "run", "test.touch", "--env", "dev"]).await;
+    let (exit, out, err) = ss_with(
+        services,
+        &["ss-support", "run", "test.touch", "--env", "dev"],
+    )
+    .await;
     assert_eq!(exit, Exit::Failed);
     assert_eq!(
         err,
-        "Proceed with test.touch? [y/N] \nss run test.touch: operation not confirmed\n"
+        "Proceed with test.touch? [y/N] \nss-support run test.touch: operation not confirmed\n"
     );
     assert_eq!(out, "");
 }
@@ -693,14 +792,17 @@ async fn eof_at_the_prompt_ends_the_prompt_line() {
 async fn interrupt_at_the_prompt_ends_the_prompt_line() {
     let root = tempfile::tempdir().expect("tempdir");
     let (services, runs) = touch_services(root.path());
-    let cli = parse(&services, &["ss", "run", "test.touch", "--env", "dev"]);
+    let cli = parse(
+        &services,
+        &["ss-support", "run", "test.touch", "--env", "dev"],
+    );
     let (release, gate) = mpsc::channel();
     let (io, captured) = Io::capture("");
     let io = Io {
         stdin: Source::new(BufReader::new(Gate(gate))),
         ..io
     };
-    let exit = ss::run_with_interrupt(
+    let exit = ss_support::run_with_interrupt(
         cli,
         services,
         io,
@@ -711,10 +813,10 @@ async fn interrupt_at_the_prompt_ends_the_prompt_line() {
     assert_eq!(exit, Exit::Interrupted);
     assert_eq!(
         captured.stderr(),
-        "Proceed with test.touch? [y/N] \nss run test.touch: touch: cancelled\n"
+        "Proceed with test.touch? [y/N] \nss-support run test.touch: touch: cancelled\n"
     );
     assert_eq!(runs.load(Ordering::SeqCst), 1);
-    let audit = fs::read_to_string(root.path().join(".local/state/ss/audit.log"))
+    let audit = fs::read_to_string(root.path().join(".local/state/ss-support/audit.log"))
         .expect("interrupted run is audited");
     assert!(audit.contains("\"outcome\":\"error\""), "{audit}");
 }
@@ -730,7 +832,7 @@ async fn audit_write_failure_warns_and_keeps_the_exit_code() {
     );
     let (exit, out, err) = ss_with(
         services,
-        &["ss", "run", "test.touch", "--env", "dev", "--yes"],
+        &["ss-support", "run", "test.touch", "--env", "dev", "--yes"],
     )
     .await;
     assert_eq!(exit, Exit::Ok, "{err}");

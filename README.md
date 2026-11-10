@@ -1,4 +1,4 @@
-# ss
+# ss-support
 
 Support operations CLI for non-production AWS and Kubernetes resources,
 ported from an earlier implementation.
@@ -7,32 +7,32 @@ ported from an earlier implementation.
 
 ```bash
 make check                          # fmt + clippy (-D warnings) + tests
-cargo build --release               # target/release/ss
-cargo install --path crates/ss      # install ss into ~/.cargo/bin
-cargo run -p ss -- --version
+cargo build --release               # target/release/ss-support
+cargo install --path crates/ss-support      # install ss-support into ~/.cargo/bin
+cargo run -p ss-support -- --version
 ```
 
 Crates: `crates/ss-core` (diff engine, operations layer, ports; no AWS
-dependencies) and `crates/ss` (the binary: CLI and AWS adapters).
+dependencies) and `crates/ss-support` (the binary: CLI and AWS adapters).
 `make help` lists every target; `docs/` holds the design notes, testing
 plan, and an example config.
 
 ## CLI
 
 ```bash
-ss ops list                                   # every operation
-ss ops describe demo.json-diff                # its params, defaults, help
-ss run demo.json-diff --left a.json --right b.json -o json
-ss presets list                               # saved parameter sets
+ss-support ops list                                   # every operation
+ss-support ops describe demo.json-diff                # its params, defaults, help
+ss-support run demo.json-diff --left a.json --right b.json -o json
+ss-support presets list                               # saved parameter sets
 ```
 
 Global flags work before or after the subcommand.
 
 | flag | overrides | notes |
 |---|---|---|
-| `--env NAME` | `SS_ENV`, then `default_env` in the config | writes are refused unless `NAME` is in the config's `environments` |
-| `--profile NAME` | `SS_PROFILE`, then the environment's `profile` | AWS profile |
-| `--region REGION` | `SS_REGION`, then the environment's `region` | AWS region |
+| `--env NAME` | `SS_SUPPORT_ENV`, then `default_env` in the config | writes are refused unless `NAME` is in the config's `environments` |
+| `--profile NAME` | `SS_SUPPORT_PROFILE`, then the environment's `profile` | AWS profile |
+| `--region REGION` | `SS_SUPPORT_REGION`, then the environment's `region` | AWS region |
 | `--context KUBE_CONTEXT` | the environment's `kube_context` | Kubernetes context |
 | `-o, --output FORMAT` | `text` | `text` or `json` (`{"views":[...]}`); anything else exits 2 before running |
 | `--export FILE` | | after a successful run, writes a markdown report with the resolved params |
@@ -40,8 +40,8 @@ Global flags work before or after the subcommand.
 | `--yes` | | auto-confirms mutating operations, never destructive ones |
 | `-v, --verbose` | | step progress on stderr |
 | `--no-cache` | | bypasses the local object-version cache |
-| `--preset NAME` (`ss run`) | | loads a saved param set; flags given on the command line win |
-| `--save-preset NAME` (`ss run`) | | after a successful run, saves the params given (not the defaults); with none given, exits 2 before running |
+| `--preset NAME` (`ss-support run`) | | loads a saved param set; flags given on the command line win |
+| `--save-preset NAME` (`ss-support run`) | | after a successful run, saves the params given (not the defaults); with none given, exits 2 before running |
 
 Op flags take values that start with a hyphen (`--repeat -1`); a flag given
 twice takes its last value.
@@ -61,20 +61,20 @@ delete.
 
 ```bash
 # semantic diff of two versions of one object ("null" = current)
-ss run s3.version-diff --bucket my-bucket --key cfg/tenants/acme.json --a <version-id> --b null
+ss-support run s3.version-diff --bucket my-bucket --key cfg/tenants/acme.json --a <version-id> --b null
 
 # metadata, version history, and a body preview
-ss run s3.object-inspect --bucket my-bucket --key cfg/tenants/acme.json
+ss-support run s3.object-inspect --bucket my-bucket --key cfg/tenants/acme.json
 
 # object count, size, age spread, and the largest objects under a prefix
-ss run s3.prefix-audit --bucket my-bucket --prefix cfg/ --top 5
+ss-support run s3.prefix-audit --bucket my-bucket --prefix cfg/ --top 5
 ```
 
-`ss ops describe <id>` lists each operation's params.
+`ss-support ops describe <id>` lists each operation's params.
 
-**Identity.** The selected environment (`--env`, `SS_ENV`, or `default_env`)
-supplies the AWS profile and region; `--profile` / `SS_PROFILE` and
-`--region` / `SS_REGION` override them. When the environment sets
+**Identity.** The selected environment (`--env`, `SS_SUPPORT_ENV`, or `default_env`)
+supplies the AWS profile and region; `--profile` / `SS_SUPPORT_PROFILE` and
+`--region` / `SS_SUPPORT_REGION` override them. When the environment sets
 `account_id`, the caller identity is checked against it before the first S3
 call, and a mismatch stops the run. An expired or never-started SSO session,
 or no credentials at all, is reported with the `aws sso login --profile
@@ -83,7 +83,7 @@ or no credentials at all, is reported with the `aws sso login --profile
 **Cache and limits.** Fetched object versions are cached locally; `--no-cache`
 bypasses the cache. Bodies over 32 MiB are refused.
 
-**S3-compatible endpoints.** With `SS_S3_ENDPOINT` set, S3 calls go to that
+**S3-compatible endpoints.** With `SS_SUPPORT_S3_ENDPOINT` set, S3 calls go to that
 endpoint using path-style addressing, and the identity check is skipped;
 credentials are still resolved first.
 
@@ -100,15 +100,15 @@ MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
 
 export AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin AWS_REGION=us-east-1
 
-# ss only reads: create and seed a versioned bucket with the AWS CLI
+# ss-support only reads: create and seed a versioned bucket with the AWS CLI
 aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://demo
 aws --endpoint-url http://127.0.0.1:9000 s3api put-bucket-versioning \
   --bucket demo --versioning-configuration Status=Enabled
 aws --endpoint-url http://127.0.0.1:9000 s3 cp ./acme.json s3://demo/cfg/acme.json
 
-SS_REGION=us-east-1 SS_S3_ENDPOINT=http://127.0.0.1:9000 \
-  ss run s3.prefix-audit --bucket demo --prefix cfg/
+SS_SUPPORT_REGION=us-east-1 SS_SUPPORT_S3_ENDPOINT=http://127.0.0.1:9000 \
+  ss-support run s3.prefix-audit --bucket demo --prefix cfg/
 ```
 
-`SS_S3_TEST_ENDPOINT=http://127.0.0.1:9000 make contract` runs the S3
+`SS_SUPPORT_S3_TEST_ENDPOINT=http://127.0.0.1:9000 make contract` runs the S3
 contract suite against the same server.

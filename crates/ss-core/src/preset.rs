@@ -84,14 +84,14 @@ pub fn validate(
     Ok(())
 }
 
-/// The presets file location: `SS_PRESETS`, else
-/// `$XDG_CONFIG_HOME/ss/presets.yaml`, else `~/.config/ss/presets.yaml`.
+/// The presets file location: `SS_SUPPORT_PRESETS`, else
+/// `$XDG_CONFIG_HOME/ss-support/presets.yaml`, else `~/.config/ss-support/presets.yaml`.
 pub fn default_path(v: &Vars) -> PathBuf {
-    if let Some(p) = vars::get(v, "SS_PRESETS") {
+    if let Some(p) = vars::get(v, "SS_SUPPORT_PRESETS") {
         return PathBuf::from(p);
     }
     vars::base_dir(v, "XDG_CONFIG_HOME", ".config")
-        .join("ss")
+        .join("ss-support")
         .join("presets.yaml")
 }
 
@@ -501,7 +501,7 @@ mod tests {
     fn new_directories_are_private() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
-        let sub = dir.path().join("ss");
+        let sub = dir.path().join("ss-support");
         let s = Store::new(sub.join("presets.yaml"));
         s.save("op", "n", &params(&[("a", "1")])).expect("save");
         let mode = fs::metadata(&sub).expect("metadata").permissions().mode();
@@ -511,16 +511,22 @@ mod tests {
     #[test]
     fn default_path_honors_ss_presets() {
         assert_eq!(
-            default_path(&vars(&[("SS_PRESETS", "/x/p.yaml"), ("HOME", "/h")])),
+            default_path(&vars(&[
+                ("SS_SUPPORT_PRESETS", "/x/p.yaml"),
+                ("HOME", "/h")
+            ])),
             PathBuf::from("/x/p.yaml")
         );
         assert_eq!(
-            default_path(&vars(&[("SS_PRESETS", ""), ("XDG_CONFIG_HOME", "/c")])),
-            PathBuf::from("/c/ss/presets.yaml")
+            default_path(&vars(&[
+                ("SS_SUPPORT_PRESETS", ""),
+                ("XDG_CONFIG_HOME", "/c")
+            ])),
+            PathBuf::from("/c/ss-support/presets.yaml")
         );
         assert_eq!(
             default_path(&vars(&[("HOME", "/h")])),
-            PathBuf::from("/h/.config/ss/presets.yaml")
+            PathBuf::from("/h/.config/ss-support/presets.yaml")
         );
     }
 }

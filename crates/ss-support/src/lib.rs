@@ -1,4 +1,4 @@
-//! `ss` — support operations CLI.
+//! `ss-support` — support operations CLI.
 //!
 //! `main.rs` is a shim: it builds [`Services`], parses [`Cli`], and turns the
 //! [`Exit`] returned by [`run`] into the process exit code. Everything

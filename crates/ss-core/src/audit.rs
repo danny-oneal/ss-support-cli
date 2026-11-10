@@ -116,11 +116,11 @@ impl Logger for FileLogger {
     }
 }
 
-/// The default audit log location: `$XDG_STATE_HOME/ss/audit.log`, else
-/// `~/.local/state/ss/audit.log`.
+/// The default audit log location: `$XDG_STATE_HOME/ss-support/audit.log`, else
+/// `~/.local/state/ss-support/audit.log`.
 pub fn default_path(v: &Vars) -> PathBuf {
     vars::base_dir(v, "XDG_STATE_HOME", ".local/state")
-        .join("ss")
+        .join("ss-support")
         .join("audit.log")
 }
 
@@ -252,11 +252,11 @@ mod tests {
     #[test]
     fn default_path_honors_xdg_state_home() {
         let v = Vars::from([("XDG_STATE_HOME".to_owned(), "/s".to_owned())]);
-        assert_eq!(default_path(&v), PathBuf::from("/s/ss/audit.log"));
+        assert_eq!(default_path(&v), PathBuf::from("/s/ss-support/audit.log"));
         let v = Vars::from([("HOME".to_owned(), "/h".to_owned())]);
         assert_eq!(
             default_path(&v),
-            PathBuf::from("/h/.local/state/ss/audit.log")
+            PathBuf::from("/h/.local/state/ss-support/audit.log")
         );
     }
 }

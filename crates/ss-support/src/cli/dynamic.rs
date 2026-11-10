@@ -44,7 +44,7 @@ fn param_arg(param: &Param) -> Arg {
 }
 
 /// How a param is documented. Both the flag's `--help` text and the
-/// `ss ops describe` row are built from this, so they always agree.
+/// `ss-support ops describe` row are built from this, so they always agree.
 pub struct ParamDoc {
     name: &'static str,
     ty: ParamType,
@@ -81,7 +81,7 @@ impl ParamDoc {
         parts.join(" ")
     }
 
-    /// The `ss ops describe` row: flag, type, `yes` when required, default,
+    /// The `ss-support ops describe` row: flag, type, `yes` when required, default,
     /// help.
     pub fn row(&self) -> Vec<String> {
         vec![

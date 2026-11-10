@@ -2035,24 +2035,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ss"
-version = "0.1.0-alpha.1"
-dependencies = [
- "anyhow",
- "async-trait",
- "aws-config",
- "aws-sdk-s3",
- "aws-sdk-sts",
- "chrono",
- "clap",
- "serde_json",
- "ss-core",
- "tempfile",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "ss-core"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -2066,6 +2048,24 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "ss-support"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
+ "aws-sdk-sts",
+ "chrono",
+ "clap",
+ "serde_json",
+ "ss-core",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]
