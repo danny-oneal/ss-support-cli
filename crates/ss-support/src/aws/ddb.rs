@@ -12,9 +12,13 @@ use aws_config::SdkConfig;
 use aws_sdk_dynamodb::config::http::HttpResponse;
 use aws_sdk_dynamodb::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_dynamodb::operation::query::QueryInput;
+use aws_sdk_dynamodb::primitives::Blob;
 use aws_sdk_dynamodb::types::{
     AttributeValue, KeyType, ProjectionType, ScalarAttributeType, TableDescription,
 };
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use serde_json::{Number, Value};
 use ss_core::jsonutil;
 use ss_core::svc::SvcError;
 use ss_core::svc::ddb::{
@@ -168,11 +172,52 @@ fn is_not_found(code: Option<&str>) -> bool {
 
 /// Unmarshals an attribute map into plain JSON, with every number passed
 /// through [`jsonutil::normalize`] so it compares as an `f64`.
+///
+/// Binary values (`B`) become standard-alphabet, padded base64 strings and
+/// binary sets (`BS`) arrays of them. String and number sets (`SS`, `NS`)
+/// become plain arrays, so a set is indistinguishable from a list afterwards.
 fn item_from_av(av: HashMap<String, AttributeValue>) -> Result<Item, SvcError> {
-    let mut item: Item = serde_dynamo::from_item(av)
-        .map_err(|e| SvcError::Other(anyhow::Error::from(e).context("decode item")))?;
+    let mut item = Item::with_capacity(av.len());
+    for (name, value) in av {
+        let json = json_from_av(value)
+            .map_err(|e| SvcError::Other(e.context(format!("decode attribute {name}"))))?;
+        item.insert(name, json);
+    }
     item.values_mut().for_each(jsonutil::normalize);
     Ok(item)
+}
+
+/// One attribute value as JSON; see [`item_from_av`] for the mapping.
+fn json_from_av(av: AttributeValue) -> anyhow::Result<Value> {
+    let number = |n: &str| {
+        n.parse::<Number>()
+            .map(Value::Number)
+            .map_err(|e| anyhow::Error::from(e).context(format!("number {n:?}")))
+    };
+    let base64 = |b: &Blob| Value::String(STANDARD.encode(b.as_ref()));
+    Ok(match av {
+        AttributeValue::S(s) => Value::String(s),
+        AttributeValue::N(n) => number(&n)?,
+        AttributeValue::B(b) => base64(&b),
+        AttributeValue::Bool(b) => Value::Bool(b),
+        AttributeValue::Null(_) => Value::Null,
+        AttributeValue::Ss(set) => set.into_iter().map(Value::String).collect(),
+        AttributeValue::Ns(set) => set
+            .iter()
+            .map(|n| number(n))
+            .collect::<anyhow::Result<Value>>()?,
+        AttributeValue::Bs(set) => set.iter().map(base64).collect(),
+        AttributeValue::L(list) => list
+            .into_iter()
+            .map(json_from_av)
+            .collect::<anyhow::Result<Value>>()?,
+        AttributeValue::M(map) => Value::Object(
+            map.into_iter()
+                .map(|(k, v)| Ok((k, json_from_av(v)?)))
+                .collect::<anyhow::Result<serde_json::Map<_, _>>>()?,
+        ),
+        other => return Err(anyhow!("unsupported attribute value {other:?}")),
+    })
 }
 
 /// Marshals a key into an attribute map: JSON numbers become `N`, strings `S`.
@@ -281,6 +326,7 @@ fn query_input(q: &QuerySpec, index: Option<&str>) -> Result<QueryInput, SvcErro
 mod tests {
     use std::collections::HashMap;
 
+    use aws_sdk_dynamodb::primitives::Blob;
     use aws_sdk_dynamodb::types::{
         AttributeDefinition, AttributeValue, GlobalSecondaryIndexDescription, KeySchemaElement,
         KeyType, Projection as SdkProjection, ProjectionType, ScalarAttributeType,
@@ -442,6 +488,7 @@ mod tests {
         let plain = query_input(
             &QuerySpec {
                 names: Default::default(),
+                values: Default::default(),
                 ..spec
             },
             None,
@@ -449,5 +496,54 @@ mod tests {
         .expect("input");
         assert_eq!(plain.index_name(), None);
         assert!(plain.expression_attribute_names().is_none());
+        assert!(plain.expression_attribute_values().is_none());
+    }
+
+    #[test]
+    fn items_with_binary_attributes_decode_as_base64() {
+        let blob = |bytes: &[u8]| AttributeValue::B(Blob::new(bytes.to_vec()));
+        let av: HashMap<String, AttributeValue> = HashMap::from([
+            ("payload".to_owned(), blob(b"hello")),
+            (
+                "blobs".to_owned(),
+                AttributeValue::Bs(vec![Blob::new(b"a".to_vec()), Blob::new(b"bc".to_vec())]),
+            ),
+            (
+                "list".to_owned(),
+                AttributeValue::L(vec![blob(&[0xff, 0xfe])]),
+            ),
+            (
+                "nested".to_owned(),
+                AttributeValue::M(HashMap::from([("b".to_owned(), blob(b""))])),
+            ),
+        ]);
+        let item = item_from_av(av).expect("unmarshal");
+        assert_eq!(
+            Value::Object(item),
+            json!({
+                "payload": "aGVsbG8=",
+                "blobs": ["YQ==", "YmM="],
+                "list": ["//4="],
+                "nested": {"b": ""}
+            })
+        );
+    }
+
+    #[test]
+    fn string_and_number_sets_decode_as_arrays() {
+        let av: HashMap<String, AttributeValue> = HashMap::from([
+            (
+                "tags".to_owned(),
+                AttributeValue::Ss(vec!["a".into(), "b".into()]),
+            ),
+            (
+                "sizes".to_owned(),
+                AttributeValue::Ns(vec!["1".into(), "2.5".into()]),
+            ),
+        ]);
+        let item = item_from_av(av).expect("unmarshal");
+        let mut want = json!({"tags": ["a", "b"], "sizes": [1.0, 2.5]});
+        jsonutil::normalize(&mut want);
+        assert_eq!(Value::Object(item), want);
     }
 }

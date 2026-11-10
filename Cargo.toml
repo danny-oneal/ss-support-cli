@@ -17,6 +17,7 @@ aws-config = { version = "1.8", features = ["behavior-version-latest"] }
 aws-sdk-dynamodb = "1"
 aws-sdk-s3 = "1.122"
 aws-sdk-sts = "1.97"
+base64 = "0.21"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 clap = { version = "4", features = ["derive"] }
 globset = "0.4"
