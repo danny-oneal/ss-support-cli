@@ -13,13 +13,15 @@ use crate::svc::ddb::{AttrType, DdbPort, Item, Key, TableInfo};
 
 #[cfg(test)]
 pub(crate) mod fixture;
+mod item_compare;
+
+pub use item_compare::ItemCompare;
 
 /// The DynamoDB port of `deps`, or an error when the invocation has none.
 ///
 /// # Errors
 ///
 /// Returns an error when `deps` carries no DynamoDB port.
-#[allow(dead_code)] // not called until the DynamoDB operations land
 pub(crate) fn port(deps: &Deps) -> anyhow::Result<Arc<dyn DdbPort>> {
     deps.ddb
         .clone()
@@ -27,7 +29,6 @@ pub(crate) fn port(deps: &Deps) -> anyhow::Result<Arc<dyn DdbPort>> {
 }
 
 /// Suggests every table name.
-#[allow(dead_code)] // not called until the DynamoDB operations land
 pub(crate) fn suggest_tables() -> SuggestFn {
     Arc::new(|deps: Deps, _input: Input| {
         Box::pin(async move {
@@ -86,7 +87,6 @@ pub(crate) fn suggest_indexes() -> SuggestFn {
 ///
 /// Returns an error when `spec` is blank, is not valid JSON though it starts
 /// with `{`, or has a part that is not `name=value`.
-#[allow(dead_code)] // not called until the DynamoDB operations land
 pub(crate) fn parse_key(spec: &str, info: &TableInfo) -> anyhow::Result<Key> {
     let spec = spec.trim();
     if spec.is_empty() {
