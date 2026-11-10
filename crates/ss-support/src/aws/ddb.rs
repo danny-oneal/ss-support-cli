@@ -547,3 +547,240 @@ mod tests {
         assert_eq!(Value::Object(item), want);
     }
 }
+
+/// The adapter against a real DynamoDB-compatible endpoint, selected with
+/// `SS_SUPPORT_DDB_TEST_ENDPOINT`; every test is skipped when it is unset.
+#[cfg(test)]
+mod dynalite {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use aws_config::{BehaviorVersion, Region, SdkConfig};
+    use aws_sdk_dynamodb::config::Credentials;
+    use aws_sdk_dynamodb::types::{
+        AttributeDefinition, GlobalSecondaryIndex, KeySchemaElement, KeyType, Projection,
+        ProjectionType, ProvisionedThroughput, ScalarAttributeType, TableStatus,
+    };
+    use serde_json::{Value, json};
+    use ss_core::svc::ddb::contract;
+    use ss_core::svc::ddb::{AttrType, DdbPort, Item, Key};
+
+    use super::{AwsDdb, Options};
+
+    /// How long a created table may take to become active.
+    const ACTIVE_TIMEOUT: Duration = Duration::from_secs(60);
+
+    /// An SDK configuration and raw client pointed at the test endpoint.
+    struct Env {
+        cfg: SdkConfig,
+        endpoint: String,
+        raw: aws_sdk_dynamodb::Client,
+        nanos: u128,
+    }
+
+    impl Env {
+        fn port(&self) -> AwsDdb {
+            AwsDdb::new(
+                &self.cfg,
+                Options {
+                    endpoint: Some(self.endpoint.clone()),
+                },
+            )
+        }
+    }
+
+    fn env_or(name: &str, default: &str) -> String {
+        std::env::var(name)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| default.to_owned())
+    }
+
+    /// Connects to the configured endpoint, or returns `None` when none is
+    /// set.
+    async fn connect() -> Option<Env> {
+        let Some(endpoint) = std::env::var("SS_SUPPORT_DDB_TEST_ENDPOINT")
+            .ok()
+            .filter(|v| !v.is_empty())
+        else {
+            eprintln!("skipping: SS_SUPPORT_DDB_TEST_ENDPOINT is not set");
+            return None;
+        };
+        let creds = Credentials::new(
+            env_or("SS_SUPPORT_DDB_TEST_KEY", "test"),
+            env_or("SS_SUPPORT_DDB_TEST_SECRET", "test"),
+            None,
+            None,
+            "static",
+        );
+        let cfg = aws_config::defaults(BehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .credentials_provider(creds)
+            .load()
+            .await;
+        let raw = aws_sdk_dynamodb::Client::from_conf(
+            aws_sdk_dynamodb::config::Builder::from(&cfg)
+                .endpoint_url(&endpoint)
+                .build(),
+        );
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock is after the epoch")
+            .as_nanos();
+        Some(Env {
+            cfg,
+            endpoint,
+            raw,
+            nanos,
+        })
+    }
+
+    fn key_element(name: &str, kind: KeyType) -> KeySchemaElement {
+        KeySchemaElement::builder()
+            .attribute_name(name)
+            .key_type(kind)
+            .build()
+            .expect("key schema element")
+    }
+
+    fn definition(name: &str, kind: ScalarAttributeType) -> AttributeDefinition {
+        AttributeDefinition::builder()
+            .attribute_name(name)
+            .attribute_type(kind)
+            .build()
+            .expect("attribute definition")
+    }
+
+    fn throughput() -> ProvisionedThroughput {
+        ProvisionedThroughput::builder()
+            .read_capacity_units(5)
+            .write_capacity_units(5)
+            .build()
+            .expect("provisioned throughput")
+    }
+
+    /// Polls until the table and all of its indexes are active.
+    async fn wait_active(raw: &aws_sdk_dynamodb::Client, table: &str) {
+        let deadline = tokio::time::Instant::now() + ACTIVE_TIMEOUT;
+        loop {
+            let out = raw
+                .describe_table()
+                .table_name(table)
+                .send()
+                .await
+                .expect("describe table while waiting");
+            let desc = out.table().expect("described table");
+            let table_active = desc.table_status() == Some(&TableStatus::Active);
+            let indexes_active = desc
+                .global_secondary_indexes()
+                .iter()
+                .all(|g| g.index_status().is_some_and(|s| s.as_str() == "ACTIVE"));
+            if table_active && indexes_active {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "table {table} did not become active"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Creates the contract table (with its `TierIndex`) and seeds it.
+    async fn create_contract_table(env: &Env, table: &str) {
+        let info = contract::table_info(table);
+        let mut create = env
+            .raw
+            .create_table()
+            .table_name(table)
+            .key_schema(key_element(&info.hash_key, KeyType::Hash))
+            .provisioned_throughput(throughput());
+        if let Some(sort) = &info.sort_key {
+            create = create.key_schema(key_element(sort, KeyType::Range));
+        }
+        for (name, kind) in &info.attr_types {
+            let scalar = match kind {
+                AttrType::S => ScalarAttributeType::S,
+                AttrType::N => ScalarAttributeType::N,
+                AttrType::B => ScalarAttributeType::B,
+            };
+            create = create.attribute_definitions(definition(name, scalar));
+        }
+        for gsi in &info.gsis {
+            let mut index = GlobalSecondaryIndex::builder()
+                .index_name(&gsi.name)
+                .key_schema(key_element(&gsi.hash_key, KeyType::Hash))
+                .projection(
+                    Projection::builder()
+                        .projection_type(ProjectionType::All)
+                        .build(),
+                )
+                .provisioned_throughput(throughput());
+            if let Some(sort) = &gsi.sort_key {
+                index = index.key_schema(key_element(sort, KeyType::Range));
+            }
+            create = create.global_secondary_indexes(index.build().expect("global index"));
+        }
+        create.send().await.expect("create contract table");
+        wait_active(&env.raw, table).await;
+
+        for item in contract::seed_items() {
+            put(&env.raw, table, &item).await;
+        }
+    }
+
+    /// Writes `item` through the raw client; the port under test never writes.
+    async fn put(raw: &aws_sdk_dynamodb::Client, table: &str, item: &Item) {
+        let av: std::collections::HashMap<String, aws_sdk_dynamodb::types::AttributeValue> =
+            serde_dynamo::to_item(item).expect("marshal item");
+        raw.put_item()
+            .table_name(table)
+            .set_item(Some(av))
+            .send()
+            .await
+            .expect("put item");
+    }
+
+    #[tokio::test]
+    async fn contract_holds_against_dynalite() {
+        let Some(env) = connect().await else { return };
+        let table = format!("ss-it-{}", env.nanos);
+        create_contract_table(&env, &table).await;
+
+        contract::run(&env.port(), &table, &format!("ss-it-missing-{}", env.nanos)).await;
+    }
+
+    #[tokio::test]
+    async fn numeric_keys_are_looked_up_as_numbers() {
+        let Some(env) = connect().await else { return };
+        let table = format!("ss-it-num-{}", env.nanos);
+        env.raw
+            .create_table()
+            .table_name(&table)
+            .key_schema(key_element("Id", KeyType::Hash))
+            .attribute_definitions(definition("Id", ScalarAttributeType::N))
+            .provisioned_throughput(throughput())
+            .send()
+            .await
+            .expect("create numeric table");
+        wait_active(&env.raw, &table).await;
+
+        let Value::Object(item) = json!({"Id": 42, "name": "n"}) else {
+            unreachable!("a JSON object literal is an object")
+        };
+        put(&env.raw, &table, &item).await;
+
+        let port = env.port();
+        let Value::Object(key) = json!({"Id": 42.0}) else {
+            unreachable!("a JSON object literal is an object")
+        };
+        let key: Key = key;
+        let found = port
+            .get_item(&table, &key)
+            .await
+            .expect("a numeric key finds the item");
+        assert_eq!(found["name"], json!("n"));
+
+        let info = port.describe_table(&table).await.expect("describe");
+        assert_eq!(info.attr_types.get("Id"), Some(&AttrType::N));
+    }
+}

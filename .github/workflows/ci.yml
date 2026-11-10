@@ -112,3 +112,44 @@ jobs:
       - name: MinIO log
         if: failure()
         run: cat "$RUNNER_TEMP/minio.log" || true
+
+  # The DynamoDB adapter against dynalite, a DynamoDB-compatible server.
+  contract-ddb:
+    name: DynamoDB contract (dynalite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Start dynalite
+        run: |
+          nohup npx --yes dynalite@3.2.2 --port 8000 > "$RUNNER_TEMP/dynalite.log" 2>&1 &
+
+      - name: Wait for dynalite
+        run: |
+          for _ in $(seq 1 60); do
+            # Any HTTP status means the server is answering.
+            curl -s -o /dev/null http://127.0.0.1:8000/ && exit 0
+            sleep 1
+          done
+          echo "dynalite did not start" >&2
+          exit 1
+
+      - name: Contract suite
+        env:
+          SS_SUPPORT_DDB_TEST_ENDPOINT: http://127.0.0.1:8000
+        run: make contract-ddb
+
+      - name: dynalite log
+        if: failure()
+        run: cat "$RUNNER_TEMP/dynalite.log" || true

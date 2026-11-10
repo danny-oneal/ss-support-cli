@@ -34,6 +34,12 @@ contract:
 	@test -n "$(SS_SUPPORT_S3_TEST_ENDPOINT)" || { echo "set SS_SUPPORT_S3_TEST_ENDPOINT"; exit 2; }
 	cargo test --locked -p ss-support aws::s3::minio -- --nocapture
 
+## contract-ddb: DynamoDB contract suite against dynalite (needs SS_SUPPORT_DDB_TEST_ENDPOINT, e.g. http://127.0.0.1:8000)
+.PHONY: contract-ddb
+contract-ddb:
+	@test -n "$(SS_SUPPORT_DDB_TEST_ENDPOINT)" || { echo "set SS_SUPPORT_DDB_TEST_ENDPOINT"; exit 2; }
+	cargo test --locked -p ss-support aws::ddb::dynalite -- --nocapture
+
 ## clean: remove build artifacts
 .PHONY: clean
 clean:
