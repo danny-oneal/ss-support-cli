@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Read-only DynamoDB operations `ddb.item-compare`, `ddb.item-history`, and
+  `ddb.gsi-consistency`, with table, index, and version suggestions.
+- DynamoDB access through the selected environment's profile and region, with
+  the same account guardrail and expired-session message as S3.
+- `SS_SUPPORT_DDB_ENDPOINT` targets a DynamoDB-compatible endpoint such as
+  dynalite (no identity check).
+- `make contract-ddb` runs the DynamoDB contract suite against dynalite.
+
 ## [0.1.0-alpha.2] - 2026-11-10
 
 ### Changed
