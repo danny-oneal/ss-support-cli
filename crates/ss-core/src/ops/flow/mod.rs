@@ -16,7 +16,10 @@ mod drift;
 #[cfg(test)]
 pub(crate) mod fixture;
 
+mod trace;
+
 pub use drift::ConfigDrift;
+pub use trace::RecordTrace;
 
 /// The Kubernetes port of `deps`, or an error when the invocation has none.
 ///
@@ -52,10 +55,6 @@ pub(crate) fn split_configmap_spec(spec: &str) -> anyhow::Result<(&str, Option<&
 ///
 /// Returns an error naming the first part that is not `name=value` or has an
 /// empty name.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the cross-service operations")
-)]
 pub(crate) fn parse_vars(spec: &str) -> anyhow::Result<BTreeMap<String, String>> {
     let mut vars = BTreeMap::new();
     if spec.trim().is_empty() {
@@ -75,10 +74,6 @@ pub(crate) fn parse_vars(spec: &str) -> anyhow::Result<BTreeMap<String, String>>
 /// Splits an object location into its bucket and key. An `s3://bucket/key`
 /// URI names both (the key is empty when only a bucket is given); any other
 /// value is a key in `configured_bucket`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the cross-service operations")
-)]
 pub(crate) fn split_s3_uri<'a>(value: &'a str, configured_bucket: &'a str) -> (&'a str, &'a str) {
     match value.strip_prefix("s3://") {
         Some(rest) => rest.split_once('/').unwrap_or((rest, "")),
@@ -90,10 +85,6 @@ pub(crate) fn split_s3_uri<'a>(value: &'a str, configured_bucket: &'a str) -> (&
 /// newest first. `current` may be the current-version alias, which names the
 /// entry flagged latest. Delete markers are skipped. `None` when `current` is
 /// absent or nothing older holds content.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the cross-service operations")
-)]
 pub(crate) fn previous_version_id<'a>(versions: &'a [Version], current: &str) -> Option<&'a str> {
     let at = if is_current(current) {
         versions.iter().position(|v| v.is_latest)

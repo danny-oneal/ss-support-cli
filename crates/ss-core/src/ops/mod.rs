@@ -33,6 +33,9 @@ pub fn builtin() -> Registry {
         .register(Arc::new(flow::ConfigDrift))
         .expect("builtin operation ids are unique");
     registry
+        .register(Arc::new(flow::RecordTrace))
+        .expect("builtin operation ids are unique");
+    registry
         .register(Arc::new(demo::Hello))
         .expect("builtin operation ids are unique");
     registry
@@ -70,6 +73,7 @@ mod tests {
             ids,
             [
                 "config.drift",
+                "record.trace",
                 "demo.hello",
                 "demo.json-diff",
                 "ddb.gsi-consistency",
