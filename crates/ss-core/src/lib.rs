@@ -4,7 +4,8 @@
 //! environment [`guard`], the [`audit`] trail, the [`cache`] store, the named
 //! [`preset`] parameter sets, the [`fuzzy`] subsequence matcher, the [`ops`]
 //! layer's input and view types, the [`render`] text and JSON output for those
-//! views, and the markdown [`report`] export.
+//! views, the markdown [`report`] export, and the [`svc`] service ports and
+//! their in-memory fakes.
 
 pub mod audit;
 pub mod cache;
@@ -17,4 +18,5 @@ pub mod ops;
 pub mod preset;
 pub mod render;
 pub mod report;
+pub mod svc;
 pub mod vars;

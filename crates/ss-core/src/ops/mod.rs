@@ -11,6 +11,7 @@ mod input;
 mod operation;
 mod registry;
 mod runner;
+pub mod s3;
 mod view;
 
 pub use confirm::{ConfirmSpec, Confirmer};
@@ -32,6 +33,15 @@ pub fn builtin() -> Registry {
         .register(Arc::new(demo::JsonDiff))
         .expect("builtin operation ids are unique");
     registry
+        .register(Arc::new(s3::ObjectInspect))
+        .expect("builtin operation ids are unique");
+    registry
+        .register(Arc::new(s3::PrefixAudit))
+        .expect("builtin operation ids are unique");
+    registry
+        .register(Arc::new(s3::VersionDiff))
+        .expect("builtin operation ids are unique");
+    registry
 }
 
 #[cfg(test)]
@@ -39,8 +49,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_registers_the_demo_ops() {
+    fn builtin_registers_every_operation() {
         let ids: Vec<_> = builtin().all().iter().map(|op| op.meta().id).collect();
-        assert_eq!(ids, ["demo.hello", "demo.json-diff"]);
+        assert_eq!(
+            ids,
+            [
+                "demo.hello",
+                "demo.json-diff",
+                "s3.object-inspect",
+                "s3.prefix-audit",
+                "s3.version-diff"
+            ]
+        );
     }
 }

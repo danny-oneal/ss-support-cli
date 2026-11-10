@@ -11,6 +11,10 @@ description = "ss support-operations CLI: diff engine, operations layer, ports a
 name = "ss_core"
 path = "src/lib.rs"
 
+[features]
+# Exposes the in-memory fakes to dependent crates' tests.
+test-support = []
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true

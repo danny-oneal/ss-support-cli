@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.1] - 2026-11-09
+
 ### Added
 - Cargo workspace (`ss-core` library, `ss` binary) with the exit-code scheme
   `0` ok · `1` operation failed · `2` usage/config error · `130` interrupted.
@@ -20,6 +22,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Demo operations `demo.hello` and `demo.json-diff`.
 - Standalone repository layout: `Makefile` (`make check`, `make msrv`), CI
   workflow, vendored diff golden fixtures, and `docs/`.
+- Read-only S3 operations `s3.version-diff`, `s3.object-inspect`, and
+  `s3.prefix-audit`, with bucket → key → version suggestions.
+- AWS access through the named profile and region of the selected
+  environment; an environment's `account_id` is checked against the caller
+  identity before the first S3 call; an expired SSO session names the
+  `aws sso login` command.
+- `SS_S3_ENDPOINT` targets an S3-compatible endpoint such as MinIO
+  (path-style, no identity check).
+- Fetched object versions are cached locally (`--no-cache` bypasses); bodies
+  over 32 MiB are refused.
+- `make contract` runs the S3 contract suite against MinIO.
 
 ### Fixed
 - A bad operation param value (e.g. `--tolerance abc`) exits 2, not 1.
@@ -36,3 +49,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cancelled, so the error starts on its own line.
 - A failed audit-log write prints `warning: audit log: …` instead of being
   silently dropped; the exit code is unchanged.
+- `s3.object-inspect` on a deleted object shows the delete marker and the
+  full version history instead of failing.
+- Missing AWS credentials and a never-started or rejected SSO session name
+  the `aws sso login --profile` command instead of a raw SDK error, also with
+  `SS_S3_ENDPOINT` set; with no profile in the environment the hint names
+  `AWS_PROFILE`'s.

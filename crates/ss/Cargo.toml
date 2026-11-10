@@ -12,9 +12,12 @@ name = "ss"
 path = "src/main.rs"
 
 [dependencies]
-ss-core = { path = "../ss-core", version = "=0.1.0" }
+ss-core = { path = "../ss-core", version = "=0.1.0-alpha.1" }
 anyhow.workspace = true
 async-trait.workspace = true
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
+aws-sdk-sts.workspace = true
 chrono.workspace = true
 clap.workspace = true
 serde_json.workspace = true
@@ -22,6 +25,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
+ss-core = { path = "../ss-core", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]

@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use crate::cache::{self, Store};
 use crate::config::{DiffDefaults, Environment, TraceConfig};
 use crate::guard::Class;
+use crate::svc::s3::S3Port;
 
 use super::{Input, OpResult, Runner};
 
@@ -193,6 +194,8 @@ pub struct Deps {
     pub diff: DiffDefaults,
     /// Trace configuration for cross-service lookups.
     pub trace: TraceConfig,
+    /// The S3 port, when this invocation has one.
+    pub s3: Option<Arc<dyn S3Port>>,
 }
 
 impl Default for Deps {
@@ -202,6 +205,7 @@ impl Default for Deps {
             env: Environment::default(),
             diff: DiffDefaults::default(),
             trace: TraceConfig::default(),
+            s3: None,
         }
     }
 }

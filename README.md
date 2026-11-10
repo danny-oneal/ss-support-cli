@@ -13,7 +13,7 @@ cargo run -p ss -- --version
 ```
 
 Crates: `crates/ss-core` (diff engine, operations layer, ports; no AWS
-dependencies) and `crates/ss` (the binary: CLI, TUI, AWS adapters).
+dependencies) and `crates/ss` (the binary: CLI and AWS adapters).
 `make help` lists every target; `docs/` holds the design notes, testing
 plan, and an example config.
 
@@ -53,3 +53,62 @@ param, unknown preset, nothing to save with `--save-preset`) or an unparsable
 config/presets file · `130` interrupted by Ctrl-C, SIGTERM, or SIGHUP (a second
 signal exits at once). A failed audit-log write is a `warning:` line on stderr
 and does not change the exit code.
+
+## S3
+
+Three operations read from S3. All are read-only: they never write, copy, or
+delete.
+
+```bash
+# semantic diff of two versions of one object ("null" = current)
+ss run s3.version-diff --bucket my-bucket --key cfg/tenants/acme.json --a <version-id> --b null
+
+# metadata, version history, and a body preview
+ss run s3.object-inspect --bucket my-bucket --key cfg/tenants/acme.json
+
+# object count, size, age spread, and the largest objects under a prefix
+ss run s3.prefix-audit --bucket my-bucket --prefix cfg/ --top 5
+```
+
+`ss ops describe <id>` lists each operation's params.
+
+**Identity.** The selected environment (`--env`, `SS_ENV`, or `default_env`)
+supplies the AWS profile and region; `--profile` / `SS_PROFILE` and
+`--region` / `SS_REGION` override them. When the environment sets
+`account_id`, the caller identity is checked against it before the first S3
+call, and a mismatch stops the run. An expired or never-started SSO session,
+or no credentials at all, is reported with the `aws sso login --profile
+<name>` command to run.
+
+**Cache and limits.** Fetched object versions are cached locally; `--no-cache`
+bypasses the cache. Bodies over 32 MiB are refused.
+
+**S3-compatible endpoints.** With `SS_S3_ENDPOINT` set, S3 calls go to that
+endpoint using path-style addressing, and the identity check is skipped;
+credentials are still resolved first.
+
+### Trying it against MinIO
+
+MinIO publishes no anonymously pullable image; build the server from source
+(needs Go 1.24 or newer):
+
+```bash
+go install github.com/minio/minio@RELEASE.2025-10-15T17-29-55Z
+mkdir -p /tmp/ss-minio
+MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
+  "$(go env GOPATH)/bin/minio" server /tmp/ss-minio --address 127.0.0.1:9000 &
+
+export AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin AWS_REGION=us-east-1
+
+# ss only reads: create and seed a versioned bucket with the AWS CLI
+aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://demo
+aws --endpoint-url http://127.0.0.1:9000 s3api put-bucket-versioning \
+  --bucket demo --versioning-configuration Status=Enabled
+aws --endpoint-url http://127.0.0.1:9000 s3 cp ./acme.json s3://demo/cfg/acme.json
+
+SS_REGION=us-east-1 SS_S3_ENDPOINT=http://127.0.0.1:9000 \
+  ss run s3.prefix-audit --bucket demo --prefix cfg/
+```
+
+`SS_S3_TEST_ENDPOINT=http://127.0.0.1:9000 make contract` runs the S3
+contract suite against the same server.

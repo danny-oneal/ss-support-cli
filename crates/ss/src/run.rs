@@ -12,13 +12,14 @@ use ss_core::config::{self, ConfigError};
 use ss_core::guard::{EnvAllowlist, Guard};
 use ss_core::ops::Deps;
 use ss_core::preset::{self, PresetError};
+use ss_core::svc::s3::Cached;
 use ss_core::vars::{self, Vars};
 use tokio_util::sync::CancellationToken;
 
 use crate::cli::{Cli, GlobalFlags};
 use crate::cmd;
 use crate::io::Io;
-use crate::services::Services;
+use crate::services::{S3Factory, Services};
 
 /// Process exit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,7 +105,12 @@ pub(crate) struct App {
 }
 
 impl App {
-    fn build(flags: &GlobalFlags, vars: &Vars, cancel: CancellationToken) -> Result<Self, Failure> {
+    fn build(
+        flags: &GlobalFlags,
+        vars: &Vars,
+        s3: &S3Factory,
+        cancel: CancellationToken,
+    ) -> Result<Self, Failure> {
         let cfg = config::load(&config::default_path(vars))?;
         let env = flags.resolve_env(&cfg, vars);
         let cache: Arc<dyn cache::Store> = if flags.no_cache {
@@ -116,11 +122,13 @@ impl App {
             name: env.name.clone(),
             allowed: env.allowed,
         });
+        let port = Cached::new(s3(&env, vars), Arc::clone(&cache));
         let deps = Deps {
             cache,
             env,
             diff: cfg.diff.clone(),
             trace: cfg.trace.clone(),
+            s3: Some(Arc::new(port)),
         };
         let user = ["USER", "LOGNAME"]
             .into_iter()
@@ -194,7 +202,7 @@ async fn pipeline(
     io: &Io,
     cancel: CancellationToken,
 ) -> Result<(), Failure> {
-    let app = App::build(&cli.global, &services.vars, cancel)?;
+    let app = App::build(&cli.global, &services.vars, &services.s3, cancel)?;
     cmd::dispatch(cli, &services.registry, &app, io).await
 }
 
