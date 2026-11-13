@@ -1,0 +1,18 @@
+---
+source: crates/ss-support/src/tui/components/confirm.rs
+expression: drawn(&modal)
+---
+┌ confirm ─────────────────────────────────────────────────┐
+│s3.restore-version (destructive)                          │
+│Step "copy the version" will change:                      │
+│                                                          │
+│Bucket : config-dev                                       │
+│Key    : orders-dev                                       │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│This is DESTRUCTIVE. Type "orders-dev" to confirm:        │
+│> orders                                                  │
+│enter confirm · esc decline                               │
+└──────────────────────────────────────────────────────────┘

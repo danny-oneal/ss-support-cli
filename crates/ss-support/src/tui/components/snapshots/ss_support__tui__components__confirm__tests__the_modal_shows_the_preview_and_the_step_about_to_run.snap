@@ -1,0 +1,18 @@
+---
+source: crates/ss-support/src/tui/components/confirm.rs
+expression: drawn(&modal)
+---
+┌ confirm ─────────────────────────────────────────────────┐
+│s3.restore-version (mutate)                               │
+│Step "copy the version" will change:                      │
+│                                                          │
+│Bucket : config-dev                                       │
+│Key    : orders-dev                                       │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│Proceed with s3.restore-version? [y/n]                    │
+│y proceed · n or esc decline                              │
+└──────────────────────────────────────────────────────────┘

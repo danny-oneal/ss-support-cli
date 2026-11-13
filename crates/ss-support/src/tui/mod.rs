@@ -4,12 +4,15 @@
 // Nothing outside this module calls into it yet.
 #![allow(dead_code)]
 
+pub mod bridge;
 pub mod components;
 pub mod screen;
 pub mod shell;
 pub mod theme;
 pub mod widgets;
 
+#[cfg(test)]
+pub(crate) mod stub_ops;
 #[cfg(test)]
 pub(crate) mod testing;
 
@@ -83,20 +86,35 @@ impl Drop for TermGuard {
 /// exit path, any number of times; it does nothing when the TUI never took
 /// the terminal over.
 pub fn restore_terminal() {
-    if ENTERED.take() {
+    restore();
+}
+
+/// Puts the terminal back if the TUI holds it, and says whether it did.
+fn restore() -> bool {
+    let held = ENTERED.take();
+    if held {
         // Nothing useful can be done when the terminal itself is failing.
         let _ = leave_sequences(&mut io::stdout());
         let _ = disable_raw_mode();
     }
+    held
 }
 
-/// Makes a panic put the terminal back before the panic message is printed,
-/// so the message is readable and the shell is usable afterwards.
+/// The exit status of a process ended by a panic.
+const PANIC_EXIT: i32 = 101;
+
+/// Makes a panic while the TUI holds the terminal put the terminal back,
+/// print the panic message where it can be read, and end the process. A
+/// TUI that kept running after a panic on some task would be drawing on a
+/// terminal it no longer controls.
 pub(crate) fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal();
+        let held = restore();
         previous(info);
+        if held {
+            std::process::exit(PANIC_EXIT);
+        }
     }));
 }
 

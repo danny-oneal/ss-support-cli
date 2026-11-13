@@ -12,6 +12,8 @@ mod ops;
 mod presets;
 mod run_op;
 
+pub(crate) use run_op::elapsed_text;
+
 /// Runs the chosen subcommand; with none, prints the help.
 pub(crate) async fn dispatch(
     cli: &Cli,

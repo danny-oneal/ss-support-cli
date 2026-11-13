@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::screen::{Cmd, Ctx, Msg, Screen, ScreenId};
-use super::theme;
+use super::{bridge, theme};
 
 /// The smallest terminal the screens are drawn on.
 const MIN_WIDTH: u16 = 20;
@@ -236,7 +236,14 @@ impl Shell {
                     });
                 }
                 Cmd::Run(request) => match position.and_then(|index| self.stack.get_mut(index)) {
-                    Some(entry) => entry.runs.push(request.cancel),
+                    Some(entry) => {
+                        entry.runs.push(request.cancel.clone());
+                        let results = self.results.clone();
+                        bridge::start(&self.ctx, request, move |msg| {
+                            results.send((issuer, msg)).is_ok()
+                        });
+                    }
+                    // Nobody is left to show the run, so it never starts.
                     None => request.cancel.cancel(),
                 },
             }
@@ -280,6 +287,7 @@ mod tests {
 
     use super::*;
     use crate::tui::screen::{Cmd, Loaded, RunRequest};
+    use crate::tui::stub_ops::StubOp;
     use crate::tui::testing::{
         Log, Probe, ch, ctrl, ctx, entries, is_char, key, render_shell, screen_text,
     };
@@ -502,8 +510,66 @@ mod tests {
         );
     }
 
-    #[test]
-    fn popping_a_screen_cancels_the_run_it_started() {
+    #[tokio::test]
+    async fn a_run_reports_to_the_screen_that_started_it() {
+        let log = log();
+        let request = RunRequest {
+            op: Arc::new(StubOp::read("stub.read", &["fetch"])),
+            input: Input::default(),
+            cancel: CancellationToken::new(),
+        };
+        let root = pusher(&log, Probe::new("child", &log)).on_init(move || vec![Cmd::Run(request)]);
+        let mut shell = Shell::new(ctx(), Box::new(root));
+        shell.handle(None, Msg::Key(ch('p')));
+
+        for _ in 0..3 {
+            tokio::time::timeout(Duration::from_secs(5), shell.pump())
+                .await
+                .expect("the run reports to the shell");
+        }
+
+        assert_eq!(
+            entries(&log),
+            [
+                "root:init",
+                "root:key:p",
+                "child:init",
+                "root:progress:fetch",
+                "root:progress:fetch",
+                "root:done:ok"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_asked_for_by_a_screen_that_has_gone_never_starts() {
+        let log = log();
+        let cancel = CancellationToken::new();
+        let mut request = Some(run_request(&cancel));
+        let child = Probe::new("child", &log).on_msg(move |msg| {
+            if is_char(msg, 'x') {
+                request
+                    .take()
+                    .map(|r| vec![Cmd::Pop, Cmd::Run(r)])
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        });
+        let mut shell = Shell::new(ctx(), Box::new(pusher(&log, child)));
+        shell.handle(None, Msg::Key(ch('p')));
+
+        shell.handle(None, Msg::Key(ch('x')));
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(cancel.is_cancelled());
+        assert!(shell.inbox.try_recv().is_err(), "nothing was started");
+    }
+
+    #[tokio::test]
+    async fn popping_a_screen_cancels_the_run_it_started() {
         let log = log();
         let cancel = CancellationToken::new();
         let request = run_request(&cancel);
@@ -517,8 +583,8 @@ mod tests {
         assert!(cancel.is_cancelled());
     }
 
-    #[test]
-    fn closing_the_shell_cancels_every_run() {
+    #[tokio::test]
+    async fn closing_the_shell_cancels_every_run() {
         let log = log();
         let cancel = CancellationToken::new();
         let request = run_request(&cancel);

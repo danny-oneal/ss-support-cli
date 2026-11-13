@@ -153,12 +153,17 @@ fn progress_line(p: &Progress) -> String {
     let step = &p.step;
     match p.status {
         StepStatus::Running => format!("→ {step} ...\n"),
-        StepStatus::Done => match round_to_millis(p.elapsed) {
-            Duration::ZERO => format!("✓ {step} (0s)\n"),
-            d => format!("✓ {step} ({d:?})\n"),
-        },
+        StepStatus::Done => format!("✓ {step} ({})\n", elapsed_text(p.elapsed)),
         StepStatus::Failed => format!("✗ {step}: {}\n", p.err.as_deref().unwrap_or_default()),
         StepStatus::Skipped => format!("⊘ {step} (dry-run)\n"),
+    }
+}
+
+/// How long a step took, to the millisecond: `0s`, `150ms`, `1.5s`.
+pub(crate) fn elapsed_text(d: Duration) -> String {
+    match round_to_millis(d) {
+        Duration::ZERO => "0s".to_owned(),
+        d => format!("{d:?}"),
     }
 }
 
