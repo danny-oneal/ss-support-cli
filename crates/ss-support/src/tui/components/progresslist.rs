@@ -35,6 +35,11 @@ impl ProgressList {
         self.steps.is_empty()
     }
 
+    /// How many rows the list has.
+    pub fn len(&self) -> usize {
+        self.steps.len()
+    }
+
     /// Draws one row per step; when there are more steps than rows, the
     /// latest are shown.
     pub fn render(&self, frame: &mut Frame, area: Rect) {

@@ -3,6 +3,7 @@
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui::widgets::text_input::TextInput;
@@ -58,7 +59,7 @@ impl Prompt {
                 height: area.height.min(1),
                 ..area
             });
-        frame.render_widget(self.label.as_str(), label);
+        frame.render_widget(Line::from(self.label.as_str()), label);
         self.input.render(frame, field, true);
     }
 }
@@ -122,6 +123,6 @@ mod tests {
         let (prompt, _) = after(&typed("nightly"));
 
         render_with(3, 1, |frame| prompt.render(frame, frame.area()));
-        render_with(3, 1, |frame| prompt.render(frame, Rect::new(0, 0, 0, 0)));
+        render_with(3, 1, |frame| prompt.render(frame, Rect::new(0, 1, 3, 0)));
     }
 }

@@ -9,6 +9,7 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
+use ratatui::text::Line;
 use ratatui::{Frame, Terminal};
 use ss_core::audit;
 use ss_core::guard::AllowAll;
@@ -65,6 +66,32 @@ pub(crate) fn render_screen(screen: &dyn Screen, width: u16, height: u16) -> Str
     render_with(width, height, |frame| {
         screen.view(frame, Rect::new(0, 0, width, height));
     })
+}
+
+/// Sends `keys` to the shell's top screen, one after another.
+pub(crate) fn press(shell: &mut Shell, keys: &[KeyEvent]) {
+    for &k in keys {
+        shell.handle(None, Msg::Key(k));
+    }
+}
+
+/// Delivers background results until the 80x24 screen contains `text`, and
+/// returns that screen.
+///
+/// # Panics
+///
+/// When the text has not appeared after five seconds.
+pub(crate) async fn settle(shell: &mut Shell, text: &str) -> String {
+    let deadline = std::time::Duration::from_secs(5);
+    loop {
+        let shown = render_shell(shell, 80, 24);
+        if shown.contains(text) {
+            return shown;
+        }
+        if tokio::time::timeout(deadline, shell.pump()).await.is_err() {
+            panic!("{text:?} never appeared; the screen shows:\n{shown}");
+        }
+    }
 }
 
 /// A key press without modifiers.
@@ -198,7 +225,7 @@ impl Screen for Probe {
     }
 
     fn view(&self, frame: &mut Frame, area: Rect) {
-        frame.render_widget(format!("{} body", self.name), area);
+        frame.render_widget(Line::from(format!("{} body", self.name)), area);
     }
 }
 

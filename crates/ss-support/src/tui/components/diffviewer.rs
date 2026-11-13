@@ -129,7 +129,7 @@ impl DiffViewer {
         if filtered {
             let [marker, field] =
                 Layout::horizontal([Constraint::Length(2), Constraint::Min(0)]).areas(filter_row);
-            frame.render_widget("/ ", marker);
+            frame.render_widget(Line::from("/ "), marker);
             self.filter.render(frame, field, self.filtering);
         }
 
@@ -563,9 +563,12 @@ mod tests {
     #[test]
     fn a_tiny_area_draws_without_panicking() {
         let mut viewer = viewer();
+        viewer.handle(ch('/'));
+        viewer.handle(ch('k'));
+        viewer.handle(key(KeyCode::Enter));
         for mode in 0..2 {
             render_with(2, 1, |frame| viewer.render(frame, frame.area()));
-            render_with(2, 1, |frame| viewer.render(frame, Rect::new(0, 0, 0, 0)));
+            render_with(2, 1, |frame| viewer.render(frame, Rect::new(0, 1, 2, 0)));
             let _ = mode;
             viewer.handle(ch('s'));
         }

@@ -1,16 +1,24 @@
-//! A bordered panel that shows one error message, wrapped to fit.
+//! A bordered panel that shows one message, wrapped to fit: an error, or
+//! how a run ended.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
 use crate::tui::theme;
 
 /// Draws `message` in an error panel filling `area`.
 pub fn render_error(frame: &mut Frame, area: Rect, message: &str) {
+    render_notice(frame, area, "error", message, theme::error());
+}
+
+/// Draws `message` in a panel titled `title`, bordered in `style`, filling
+/// `area`.
+pub fn render_notice(frame: &mut Frame, area: Rect, title: &str, message: &str, style: Style) {
     let block = Block::bordered()
-        .title(" error ")
-        .border_style(theme::error());
+        .title(format!(" {title} "))
+        .border_style(style);
     let text = Paragraph::new(message)
         .wrap(Wrap { trim: false })
         .block(block);

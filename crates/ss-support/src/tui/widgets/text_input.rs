@@ -4,6 +4,7 @@
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
+use ratatui::text::Line;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -99,7 +100,7 @@ impl TextInput {
                 break;
             }
         }
-        frame.render_widget(visible.as_str(), Rect { height: 1, ..area });
+        frame.render_widget(Line::from(visible), Rect { height: 1, ..area });
         if focused {
             let col = before.saturating_sub(hidden).min(width - 1);
             let x = area

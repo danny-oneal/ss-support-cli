@@ -136,7 +136,7 @@ impl ConfirmModal {
         );
         let [marker, field] =
             Layout::horizontal([Constraint::Length(2), Constraint::Min(0)]).areas(entry);
-        frame.render_widget("> ", marker);
+        frame.render_widget(Line::from("> "), marker);
         self.typed.render(frame, field, true);
         let note_line = if self.mismatch {
             Line::styled("name does not match", theme::error())
@@ -327,6 +327,6 @@ mod tests {
         let (modal, _answer) = modal(Class::Destructive);
 
         render_with(3, 2, |frame| modal.render(frame, frame.area()));
-        render_with(3, 2, |frame| modal.render(frame, Rect::new(0, 0, 0, 0)));
+        render_with(3, 2, |frame| modal.render(frame, Rect::new(0, 2, 3, 0)));
     }
 }
