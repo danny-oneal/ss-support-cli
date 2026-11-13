@@ -17,6 +17,7 @@ use ss_core::ops::{
     RunFailure,
 };
 use ss_core::preset;
+use ss_core::svc::kubectl::Pod;
 use ss_core::svc::s3::{Bucket, Page, Version};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -149,6 +150,8 @@ pub enum Loaded {
     Page(Page),
     /// The versions of one object.
     Versions(Vec<Version>),
+    /// The pods of one namespace.
+    Pods(Vec<Pod>),
     /// The load failed, with the error to show.
     Failed(String),
 }

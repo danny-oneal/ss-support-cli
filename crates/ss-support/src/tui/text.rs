@@ -60,6 +60,49 @@ pub fn slice_columns(line: &str, skip: usize, width: usize) -> String {
     out
 }
 
+/// `text` without terminal escape sequences: colour and cursor codes
+/// (`ESC [ … letter`), titles and links (`ESC ] … BEL` or `ESC ] … ESC \`),
+/// and two-character escapes. A sequence cut off by the end of the text is
+/// removed with everything after it.
+pub fn strip_ansi(text: &str) -> String {
+    const ESC: char = '\x1b';
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != ESC {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            // A control sequence runs to its final character.
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // An operating-system command runs to BEL or to ESC \.
+            Some(']') => {
+                let mut after_esc = false;
+                for c in chars.by_ref() {
+                    if c == '\x07' || (after_esc && c == '\\') {
+                        break;
+                    }
+                    after_esc = c == ESC;
+                }
+            }
+            // Choosing a character set takes one more character.
+            Some('(' | ')' | '*' | '+') => {
+                chars.next();
+            }
+            // Every other escape is two characters long.
+            Some(_) | None => {}
+        }
+    }
+    out
+}
+
 /// The single line `line` broken into rows of at most `width` columns, never
 /// splitting a character. A width of zero leaves the line whole.
 pub fn wrap_columns(line: &str, width: usize) -> Vec<String> {
@@ -113,6 +156,43 @@ mod tests {
     fn plain_text_is_unchanged() {
         assert_eq!(clean("key : value — ✓ 日本"), "key : value — ✓ 日本");
         assert_eq!(clean(""), "");
+    }
+
+    #[test]
+    fn colour_and_cursor_sequences_are_removed_and_the_text_kept() {
+        assert_eq!(strip_ansi("\x1b[31mERROR\x1b[0m done"), "ERROR done");
+        assert_eq!(strip_ansi("a\x1b[2K\x1b[1;1Hb"), "ab");
+        assert_eq!(strip_ansi("\x1b[38;5;196mred\x1b[m"), "red");
+    }
+
+    #[test]
+    fn titles_and_links_are_removed_and_their_text_kept() {
+        assert_eq!(strip_ansi("\x1b]0;window title\x07text"), "text");
+        assert_eq!(
+            strip_ansi("\x1b]8;;http://example.test\x1b\\link\x1b]8;;\x1b\\"),
+            "link"
+        );
+    }
+
+    #[test]
+    fn two_character_escapes_are_removed() {
+        assert_eq!(strip_ansi("a\x1bcb\x1b(Bc"), "abc");
+    }
+
+    #[test]
+    fn a_sequence_cut_off_by_the_end_of_the_text_leaves_nothing_behind() {
+        assert_eq!(strip_ansi("abc\x1b[31"), "abc");
+        assert_eq!(strip_ansi("abc\x1b"), "abc");
+        assert_eq!(strip_ansi("abc\x1b]0;never closed"), "abc");
+    }
+
+    #[test]
+    fn text_without_escapes_is_unchanged() {
+        assert_eq!(
+            strip_ansi("2026-01-02 INFO [worker] 日本 ok"),
+            "2026-01-02 INFO [worker] 日本 ok"
+        );
+        assert_eq!(strip_ansi(""), "");
     }
 
     #[test]

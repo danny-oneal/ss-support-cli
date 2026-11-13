@@ -51,6 +51,11 @@ impl Prompt {
         }
     }
 
+    /// What has been typed so far, as typed.
+    pub fn value(&self) -> &str {
+        self.input.value()
+    }
+
     /// Adds pasted text to the answer. A paste never submits.
     pub fn paste(&mut self, text: &str) {
         self.input.paste(text);

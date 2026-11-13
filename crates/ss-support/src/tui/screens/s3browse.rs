@@ -166,7 +166,7 @@ impl S3Browse {
                 .chain(page.next.map(Row::More))
                 .collect(),
             Loaded::Versions(versions) => versions.into_iter().map(Row::Version).collect(),
-            Loaded::Suggestions(_) => return Vec::new(),
+            Loaded::Suggestions(_) | Loaded::Pods(_) => return Vec::new(),
         };
         self.loaded = true;
         self.error = None;
