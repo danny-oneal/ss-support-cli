@@ -1,0 +1,28 @@
+---
+source: crates/ss-support/src/tui/screens/opsresult.rs
+expression: "shown.join(\"----\\n\")"
+---
+Greeting : hello world
+Rows     : 3
+
+
+
+
+----
+Largest objects
+Key                 Size
+------------------  ------
+config/orders.json  12 KiB
+config/日本.json      3 KiB
+
+----
+Body
+{
+  "a": 1
+}
+
+
+----
+Trace
+record orders#42
+  s3://config-dev/orders.json

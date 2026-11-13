@@ -12,6 +12,7 @@ use ss_core::ops::ConfirmSpec;
 use ss_core::render;
 
 use crate::tui::screen::ConfirmRequest;
+use crate::tui::text::clean;
 use crate::tui::theme;
 use crate::tui::widgets::text_input::TextInput;
 
@@ -99,7 +100,7 @@ impl ConfirmModal {
             Line::default(),
         ];
         lines.extend(
-            render::text(&self.spec.preview)
+            clean(&render::text(&self.spec.preview))
                 .lines()
                 .map(|line| Line::from(line.to_owned())),
         );
@@ -302,6 +303,23 @@ mod tests {
         press(&mut modal, &typed("orders"));
 
         insta::assert_snapshot!(drawn(&modal));
+    }
+
+    #[test]
+    fn tabs_in_the_preview_keep_their_columns() {
+        let (request, _answer) = ConfirmRequest::new(ConfirmSpec {
+            preview: vec![View::Doc {
+                title: String::new(),
+                body: "key\tvalue\x1b[2J".to_owned(),
+                lang: String::new(),
+            }],
+            ..spec(Class::Mutate)
+        });
+        let modal = ConfirmModal::new(request);
+
+        let text = drawn(&modal);
+
+        assert!(text.contains("key     value[2J"), "{text}");
     }
 
     #[test]

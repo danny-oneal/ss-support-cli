@@ -182,8 +182,10 @@ pub trait Screen: Send {
     fn hints(&self) -> String;
     /// Called once when the screen is placed on the stack.
     fn init(&mut self, ctx: &Ctx) -> Vec<Cmd>;
-    /// Reacts to a message. No I/O happens here; work is requested through
-    /// the returned commands.
+    /// Reacts to a message. Nothing slow happens here: anything that calls
+    /// a remote service is requested through the returned commands. Small
+    /// local files (a preset, an exported report) are read and written in
+    /// place.
     fn update(&mut self, msg: Msg, ctx: &Ctx) -> Vec<Cmd>;
     /// Draws the screen into `area`.
     fn view(&self, frame: &mut Frame, area: Rect);

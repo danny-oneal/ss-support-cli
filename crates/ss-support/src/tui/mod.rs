@@ -6,8 +6,11 @@
 
 pub mod bridge;
 pub mod components;
+pub mod presets;
 pub mod screen;
+pub mod screens;
 pub mod shell;
+pub mod text;
 pub mod theme;
 pub mod widgets;
 
