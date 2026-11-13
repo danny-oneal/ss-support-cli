@@ -13,6 +13,7 @@ use ss_core::ops::{Meta, Operation, Registry};
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui::screen::{Cmd, Ctx, Msg, Screen};
+use crate::tui::screens::k8spods::K8sPods;
 use crate::tui::screens::opsform::OpsForm;
 use crate::tui::screens::s3browse::S3Browse;
 use crate::tui::text::clean;
@@ -107,6 +108,7 @@ impl OpsPicker {
                     'j' => self.step(true),
                     'k' => self.step(false),
                     'b' => return vec![Cmd::Push(Box::new(S3Browse::new(ctx)))],
+                    'p' => return vec![Cmd::Push(Box::new(K8sPods::new(ctx)))],
                     'q' => return vec![Cmd::Quit],
                     _ => {}
                 }
@@ -177,7 +179,7 @@ impl Screen for OpsPicker {
         if self.filtering {
             "type to filter · ↑↓ move · enter open · esc clear"
         } else {
-            "↑↓ move · enter open · / filter · b browse S3 · q quit"
+            "↑↓ move · enter open · / filter · b browse S3 · p pods · q quit"
         }
         .to_owned()
     }
@@ -410,13 +412,10 @@ mod tests {
     }
 
     #[test]
-    fn p_does_nothing() {
-        let mut picker = picker();
-        let before = selected(&picker);
+    fn p_opens_the_pod_list() {
+        let cmds = send(&mut picker(), &[ch('p')]);
 
-        assert!(send(&mut picker, &[ch('p')]).is_empty());
-
-        assert_eq!(selected(&picker), before);
+        assert!(pushed_title(cmds).starts_with("Pods"));
     }
 
     #[test]

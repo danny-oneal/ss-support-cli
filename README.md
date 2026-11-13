@@ -79,13 +79,15 @@ either: results are shown on screen and exported with `e`.
 
 | screen | keys |
 |---|---|
-| Operations | `↑` `↓` move · `enter` open · `/` filter by name (then `↑` `↓`, `enter`, `esc` to clear) · `b` browse S3 · `q` quit |
+| Operations | `↑` `↓` move · `enter` open · `/` filter by name (then `↑` `↓`, `enter`, `esc` to clear) · `b` browse S3 · `p` pods · `q` quit |
 | Form | `tab` `shift+tab` `↑` `↓` move between params · `↓` into the suggestions, `enter` to take one · `enter` run · `ctrl+p` load a preset · `ctrl+s` save a preset · `esc` back |
 | Run | `ctrl+c` or `esc` cancel · `esc` back once it has ended |
 | Confirm | type `y` (or `n`) and `enter` for a mutating operation · type the resource name and `enter` for a destructive one · `↑` `↓` `pgup` `pgdn` scroll the preview · `esc` decline |
 | Result | `tab` `shift+tab` next/previous view · `↑` `↓` `←` `→` `pgup` `pgdn` `g` scroll · `e` export a markdown report · `ctrl+s` save a preset · `esc` back |
 | Diff view | `n` `p` next/previous change · `pgup` `pgdn` ten changes · `g` first change · `s` unified or side-by-side · `c` one line per change · `/` filter by path |
 | S3 browser | `↑` `↓` move · `enter` open a bucket, prefix, or an object's versions · `space` mark a version · `d` compare the two marked versions · `r` reload · `esc` up |
+| Pods | `↑` `↓` move · `enter` open the pod's log · `n` another namespace (empty for the context's default) · `r` reload · `esc` back |
+| Logs | `f` follow the newest line on/off · `↑` `↓` `pgup` `pgdn` scroll (scrolling up pauses) · `g` oldest line kept · `G` newest · `←` `→` sideways · `/` filter lines · `esc` back |
 
 `ctrl+c` cancels a run, declines a confirmation, quits from the operation
 list, and goes back one screen anywhere else. `esc` goes back and never quits.
@@ -104,6 +106,13 @@ the S3 browser opens `s3.version-diff` with the bucket, key, and both version
 ids filled in, the older version as `a`; a version whose id is `null` (an
 object written before versioning was enabled) can be compared this way only
 when it is the latest.
+
+The pod list and the log read the cluster through kubectl with the
+environment's `kube_context` (or `--context`), and only ever run
+`kubectl get` and `kubectl logs`. The pod list is read once and again on
+`r`; nothing polls the cluster. A log is followed until the screen is left,
+which stops kubectl. The newest 5,000 lines are kept and the screen says how
+many earlier ones were dropped. Colour codes in log lines are removed.
 
 Leaving the TUI exits `0`; SIGTERM or SIGHUP exits `130`. A run still in
 flight is cancelled first and given up to five seconds to stop and write its

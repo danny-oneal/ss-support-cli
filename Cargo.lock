@@ -2954,7 +2954,7 @@ dependencies = [
 
 [[package]]
 name = "ss-core"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2973,7 +2973,7 @@ dependencies = [
 
 [[package]]
 name = "ss-support"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.6] - 2026-11-13
+
+### Added
+- A pod list in the TUI (`p`): the pods of the context's default namespace,
+  or of another one (`n`), with ready containers, status, restarts, and age.
+- A log view in the TUI (`enter` on a pod): the pod's log, followed as it
+  grows, with scrolling, a line filter, and sideways scrolling for long
+  lines. The newest 5,000 lines are kept; colour codes are removed. Leaving
+  the view stops kubectl.
+
 ## [0.1.0-alpha.5] - 2026-11-13
 
 ### Added

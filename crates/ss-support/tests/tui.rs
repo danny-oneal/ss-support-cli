@@ -19,6 +19,8 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Position, Size};
 use ss_core::guard::Class;
 use ss_core::ops::{Input, Meta, OpResult, Operation, Param, Runner, View};
+use ss_core::svc::SvcError;
+use ss_core::svc::kubectl::{FakeKubectl, KubectlPort};
 use ss_core::svc::s3::FakeS3;
 use ss_support::{Exit, Services};
 use tokio::sync::{Notify, mpsc};
@@ -697,4 +699,148 @@ async fn an_unparsable_config_exits_2_without_starting_the_tui() {
     let screen = tui.screen.clone();
     assert_eq!(tui.exit().await, Exit::Usage);
     assert_eq!(screen.text().trim(), "", "nothing was drawn");
+}
+
+/// One running pod, `api-7d9f`, in the default namespace.
+fn one_pod() -> FakeKubectl {
+    let fake = FakeKubectl::new();
+    fake.insert_list(
+        "",
+        "pods",
+        r#"{"items":[{"metadata":{"name":"api-7d9f"},"status":{"phase":"Running","containerStatuses":[{"ready":true,"restartCount":0}]}}]}"#,
+    );
+    fake
+}
+
+/// A cluster with one pod whose log the test feeds by hand.
+struct LiveLog {
+    pods: FakeKubectl,
+    lines: Mutex<Option<mpsc::Receiver<String>>>,
+}
+
+impl LiveLog {
+    fn new() -> (Arc<LiveLog>, mpsc::Sender<String>) {
+        let (tx, rx) = mpsc::channel(64);
+        let port = LiveLog {
+            pods: one_pod(),
+            lines: Mutex::new(Some(rx)),
+        };
+        (Arc::new(port), tx)
+    }
+}
+
+#[async_trait]
+impl KubectlPort for LiveLog {
+    async fn get_json(
+        &self,
+        namespace: &str,
+        resource: &str,
+        name: &str,
+    ) -> Result<Vec<u8>, SvcError> {
+        self.pods.get_json(namespace, resource, name).await
+    }
+
+    async fn list_json(&self, namespace: &str, resource: &str) -> Result<Vec<u8>, SvcError> {
+        self.pods.list_json(namespace, resource).await
+    }
+
+    async fn logs(
+        &self,
+        _namespace: &str,
+        _pod: &str,
+        _follow: bool,
+    ) -> Result<mpsc::Receiver<String>, SvcError> {
+        self.lines
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| SvcError::Other(anyhow::anyhow!("the log was already opened")))
+    }
+}
+
+#[tokio::test]
+async fn the_pod_list_opens_a_pod_log_and_esc_returns() {
+    let root = home();
+    let fake = one_pod();
+    fake.set_log_lines(vec![
+        "starting up".to_owned(),
+        "\x1b[32mready\x1b[0m on :8080".to_owned(),
+    ]);
+    let services = Services::isolated(root.path()).with_kubectl(Arc::new(fake));
+    let tui = Tui::start(services, &[]);
+    tui.wait_for("Operations").await;
+
+    tui.key(KeyCode::Char('p'));
+    let shown = tui.wait_for("> api-7d9f").await;
+    assert!(shown.contains("Pods — default namespace"), "{shown}");
+    tui.key(KeyCode::Enter);
+    let shown = tui.wait_for("ready on :8080").await;
+    assert!(shown.contains("Logs — api-7d9f"), "{shown}");
+    assert!(shown.contains("starting up"), "{shown}");
+    tui.wait_for("log ended").await;
+
+    tui.key(KeyCode::Esc);
+    tui.wait_for("Pods — default namespace").await;
+    tui.key(KeyCode::Esc);
+    tui.wait_for("Operations").await;
+}
+
+#[tokio::test]
+async fn leaving_the_log_stops_the_stream() {
+    let root = home();
+    let (port, log) = LiveLog::new();
+    let services = Services::isolated(root.path()).with_kubectl(port);
+    let tui = Tui::start(services, &[]);
+    tui.wait_for("Operations").await;
+    tui.key(KeyCode::Char('p'));
+    tui.wait_for("> api-7d9f").await;
+    tui.key(KeyCode::Enter);
+    log.send("first line".to_owned())
+        .await
+        .expect("the log is read");
+    tui.wait_for("first line").await;
+    assert!(!log.is_closed());
+
+    tui.key(KeyCode::Esc);
+
+    tokio::time::timeout(PATIENCE, log.closed())
+        .await
+        .expect("the stream is dropped when the screen closes");
+    tui.wait_for("Pods — default namespace").await;
+}
+
+#[tokio::test]
+async fn kubernetes_not_configured_is_shown_and_the_tui_keeps_running() {
+    let root = home();
+    let tui = Tui::start(Services::isolated(root.path()), &[]);
+    tui.wait_for("Operations").await;
+
+    tui.key(KeyCode::Char('p'));
+    tui.wait_for("Kubernetes is not configured").await;
+    tui.key(KeyCode::Esc);
+
+    tui.wait_for("Operations").await;
+}
+
+#[tokio::test]
+async fn an_interrupt_while_tailing_exits_130_and_stops_the_stream() {
+    let root = home();
+    let (port, log) = LiveLog::new();
+    let services = Services::isolated(root.path()).with_kubectl(port);
+    let tui = Tui::start(services, &[]);
+    tui.wait_for("Operations").await;
+    tui.key(KeyCode::Char('p'));
+    tui.wait_for("> api-7d9f").await;
+    tui.key(KeyCode::Enter);
+    log.send("first line".to_owned())
+        .await
+        .expect("the log is read");
+    tui.wait_for("first line").await;
+
+    tui.interrupt.notify_one();
+
+    assert_eq!(tui.exit().await, Exit::Interrupted);
+    tokio::time::timeout(PATIENCE, log.closed())
+        .await
+        .expect("the stream is dropped when the TUI exits");
 }

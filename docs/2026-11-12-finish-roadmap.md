@@ -101,6 +101,8 @@ Carried into later milestones from the review: keep a run's warnings (a failed a
 
 **Exit criteria:** screens snapshot-tested with `FakeKubectl`; an end-to-end test goes picker → pods → logs → back; a manual run against a real cluster confirms kubectl exits when the screen closes; README key table updated.
 
+**Status (2026-11-13): landed on branch `tui-pods-logs` as 0.1.0-alpha.6** (task plan `docs/2026-11-12-tui-pods-logs.md`). The open decisions were settled as the plan's Decisions section records: the namespace is typed with `n` and not stored, the pod list reloads only on `r`, `f` toggles following in the view rather than restarting kubectl, the buffer is 5,000 lines, and colour codes are stripped. Not checked: a run against a real cluster (the stream is exercised against in-memory ports only), so "kubectl exits when the screen closes" rests on the port contract (dropping the receiver stops the stream) and on tests that the receiver is dropped.
+
 ## M3 — Guarded write operations → 0.1.0-alpha.7
 
 **Deliverable:** `s3.restore-version` and `ddb.item-edit`, headless and in the TUI, each showing the exact change as its confirmation preview.
