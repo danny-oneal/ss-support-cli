@@ -397,8 +397,9 @@ async fn declining_the_confirmation_returns_to_the_form_with_the_decline_shown()
     tui.wait_for("Target").await;
     tui.type_text("orders");
     tui.key(KeyCode::Enter);
-    tui.wait_for("Proceed with stub.write? [y/n]").await;
+    tui.wait_for("Proceed with stub.write?").await;
     tui.key(KeyCode::Char('n'));
+    tui.key(KeyCode::Enter);
     let shown = tui.wait_for("Change a table — declined").await;
     assert!(shown.contains("operation not confirmed"), "{shown}");
 
@@ -459,8 +460,9 @@ async fn a_run_from_the_tui_appends_one_audit_entry() {
     tui.wait_for("Target").await;
     tui.type_text("orders");
     tui.key(KeyCode::Enter);
-    tui.wait_for("Proceed with stub.write? [y/n]").await;
+    tui.wait_for("Proceed with stub.write?").await;
     tui.key(KeyCode::Char('y'));
+    tui.key(KeyCode::Enter);
     tui.wait_for("view 1/1").await;
 
     let log = fs::read_to_string(root.path().join(".local/state/ss-support/audit.log"))

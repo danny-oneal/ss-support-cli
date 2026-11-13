@@ -1,9 +1,12 @@
-//! The confirmation asked before an operation's first mutating step: `y` or
-//! `n` for a mutating operation, the typed resource name for a destructive
-//! one.
+//! The confirmation asked before an operation's first mutating step. The
+//! answer is always typed and ended with enter: `y` for a mutating
+//! operation, the resource name for a destructive one. A single stray key
+//! can never proceed.
+
+use std::cell::Cell;
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
@@ -12,19 +15,35 @@ use ss_core::ops::ConfirmSpec;
 use ss_core::render;
 
 use crate::tui::screen::ConfirmRequest;
-use crate::tui::text::clean;
+use crate::tui::text::{clean, wrap_columns};
 use crate::tui::theme;
 use crate::tui::widgets::text_input::TextInput;
+
+/// What the typed answer amounts to when enter is pressed.
+enum Verdict {
+    Proceed,
+    Decline,
+    /// Nothing typed yet; the question stays open without comment.
+    Unanswered,
+    /// Typed, but not an answer; the question stays open and says so.
+    Unclear,
+}
 
 /// One open confirmation question.
 pub struct ConfirmModal {
     spec: ConfirmSpec,
     /// The question, until it has been answered.
     request: Option<ConfirmRequest>,
-    /// What the operator has typed for a destructive operation.
+    /// What the operator has typed as the answer.
     typed: TextInput,
-    /// The last attempt did not match the resource name.
-    mismatch: bool,
+    /// The last attempt was not an answer.
+    unclear: bool,
+    /// The first preview row shown.
+    top: usize,
+    /// The furthest the preview could scroll when it was last drawn.
+    last_top: Cell<usize>,
+    /// How many preview rows were last drawn; a page scrolls by this.
+    page: Cell<usize>,
 }
 
 impl ConfirmModal {
@@ -34,30 +53,35 @@ impl ConfirmModal {
             spec: request.spec.clone(),
             request: Some(request),
             typed: TextInput::default(),
-            mismatch: false,
+            unclear: false,
+            top: 0,
+            last_top: Cell::new(0),
+            page: Cell::new(1),
         }
     }
 
     /// Applies a key. Returns true once the question has been answered and
     /// the modal should close.
     pub fn handle(&mut self, key: KeyEvent) -> bool {
-        let destructive = self.destructive();
-        let plain = !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let page = self.page.get().max(1);
         let answer = match key.code {
             KeyCode::Esc => Some(false),
-            KeyCode::Enter if destructive => {
-                let matches =
-                    !self.spec.resource.is_empty() && self.typed.value() == self.spec.resource;
-                self.mismatch = !matches;
-                matches.then_some(true)
-            }
-            KeyCode::Char('y' | 'Y') if !destructive && plain => Some(true),
-            KeyCode::Char('n' | 'N') if !destructive && plain => Some(false),
+            KeyCode::Enter => match self.verdict() {
+                Verdict::Proceed => Some(true),
+                Verdict::Decline => Some(false),
+                Verdict::Unanswered => None,
+                Verdict::Unclear => {
+                    self.unclear = true;
+                    None
+                }
+            },
+            KeyCode::Up => self.scroll_to(self.top.saturating_sub(1)),
+            KeyCode::Down => self.scroll_to(self.top.saturating_add(1)),
+            KeyCode::PageUp => self.scroll_to(self.top.saturating_sub(page)),
+            KeyCode::PageDown => self.scroll_to(self.top.saturating_add(page)),
             _ => {
-                if destructive && self.typed.handle(key) {
-                    self.mismatch = false;
+                if self.typed.handle(key) {
+                    self.unclear = false;
                 }
                 None
             }
@@ -86,64 +110,150 @@ impl ConfirmModal {
         let inner = block.inner(area);
         frame.render_widget(Clear, area);
         frame.render_widget(block, area);
+        let width = usize::from(inner.width);
 
-        let prompt_rows = if self.destructive() { 3 } else { 2 };
-        let [preview, prompt] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(prompt_rows)]).areas(inner);
+        // The question is never cut: it wraps, and the preview gives way.
+        let question: Vec<String> = self
+            .question()
+            .iter()
+            .flat_map(|line| wrap_columns(&clean(line), width))
+            .collect();
+        let prompt_rows = u16::try_from(question.len() + 2).unwrap_or(u16::MAX);
+        let [heading, preview, prompt] = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(prompt_rows.min(inner.height)),
+        ])
+        .areas(inner);
 
-        let mut lines = vec![
-            Line::styled(
-                format!("{} ({})", self.spec.op_id, self.spec.class),
-                theme::heading(),
-            ),
-            Line::from(format!("Step \"{}\" will change:", self.spec.step)),
-            Line::default(),
-        ];
-        lines.extend(
-            clean(&render::text(&self.spec.preview))
-                .lines()
-                .map(|line| Line::from(line.to_owned())),
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(
+                    clean(&format!("{} ({})", self.spec.op_id, self.spec.class)),
+                    theme::heading(),
+                ),
+                Line::from(clean(&format!("Step \"{}\" will change:", self.spec.step))),
+            ]),
+            heading,
         );
-        frame.render_widget(Paragraph::new(lines), preview);
+        self.render_preview(frame, preview, width);
+        self.render_prompt(frame, prompt, question);
+    }
 
-        if self.destructive() {
-            self.render_name_prompt(frame, prompt);
-        } else {
-            let lines = vec![
-                Line::from(format!("Proceed with {}? [y/n]", self.spec.op_id)),
-                Line::styled("y proceed · n or esc decline", theme::hints()),
-            ];
-            frame.render_widget(Paragraph::new(lines), prompt);
+    /// Draws the preview, wrapped to `width`, from the row scrolled to. When
+    /// it does not fit, the last row says which rows are shown.
+    fn render_preview(&self, frame: &mut Frame, area: Rect, width: usize) {
+        let rows: Vec<String> = clean(&render::text(&self.spec.preview))
+            .lines()
+            .flat_map(|line| wrap_columns(line, width))
+            .collect();
+        let fits = rows.len() <= usize::from(area.height);
+        let [body, marker] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(u16::from(!fits))])
+                .areas(area);
+        let visible = usize::from(body.height);
+        let last_top = rows.len().saturating_sub(visible);
+        let top = self.top.min(last_top);
+        self.last_top.set(last_top);
+        self.page.set(visible);
+
+        let shown: Vec<Line> = rows
+            .iter()
+            .skip(top)
+            .take(visible)
+            .map(|row| Line::from(row.as_str()))
+            .collect();
+        frame.render_widget(Paragraph::new(shown), body);
+        if !fits {
+            let through = (top + visible).min(rows.len());
+            frame.render_widget(
+                Line::styled(
+                    format!(
+                        "lines {}–{through} of {} · ↑↓ pgup pgdn scroll",
+                        top + 1,
+                        rows.len()
+                    ),
+                    theme::changed(),
+                ),
+                marker,
+            );
         }
     }
 
-    fn render_name_prompt(&self, frame: &mut Frame, area: Rect) {
-        let [question, entry, note] = Layout::vertical([
-            Constraint::Length(1),
+    fn render_prompt(&self, frame: &mut Frame, area: Rect, question: Vec<String>) {
+        let question_rows = u16::try_from(question.len()).unwrap_or(u16::MAX);
+        let [asked, entry, note] = Layout::vertical([
+            Constraint::Length(question_rows),
             Constraint::Length(1),
             Constraint::Length(1),
         ])
         .areas(area);
+        let style = if self.destructive() {
+            theme::error()
+        } else {
+            theme::heading()
+        };
         frame.render_widget(
-            Line::styled(
-                format!(
-                    "This is DESTRUCTIVE. Type \"{}\" to confirm:",
-                    self.spec.resource
-                ),
-                theme::error(),
+            Paragraph::new(
+                question
+                    .into_iter()
+                    .map(|row| Line::styled(row, style))
+                    .collect::<Vec<_>>(),
             ),
-            question,
+            asked,
         );
         let [marker, field] =
             Layout::horizontal([Constraint::Length(2), Constraint::Min(0)]).areas(entry);
         frame.render_widget(Line::from("> "), marker);
         self.typed.render(frame, field, true);
-        let note_line = if self.mismatch {
-            Line::styled("name does not match", theme::error())
-        } else {
-            Line::styled("enter confirm · esc decline", theme::hints())
+        let note_line = match (self.unclear, self.destructive()) {
+            (true, true) => Line::styled("name does not match", theme::error()),
+            (true, false) => Line::styled("type y or n", theme::error()),
+            (false, _) => Line::styled("enter answer · esc decline", theme::hints()),
         };
         frame.render_widget(note_line, note);
+    }
+
+    /// The lines of the question. A destructive operation shows the name to
+    /// type on a line of its own, exactly as it must be typed.
+    fn question(&self) -> Vec<String> {
+        if self.destructive() {
+            vec![
+                "This is DESTRUCTIVE. Type this name, then enter:".to_owned(),
+                self.spec.resource.clone(),
+            ]
+        } else {
+            vec![format!(
+                "Proceed with {}? Type y or n, then enter:",
+                self.spec.op_id
+            )]
+        }
+    }
+
+    /// What pressing enter means for the text typed so far.
+    fn verdict(&self) -> Verdict {
+        let typed = self.typed.value();
+        if self.destructive() {
+            // The name must match exactly, and an empty name matches nothing.
+            return if !self.spec.resource.is_empty() && typed == self.spec.resource {
+                Verdict::Proceed
+            } else {
+                Verdict::Unclear
+            };
+        }
+        match typed.trim().to_lowercase().as_str() {
+            "" => Verdict::Unanswered,
+            "y" | "yes" => Verdict::Proceed,
+            "n" | "no" => Verdict::Decline,
+            _ => Verdict::Unclear,
+        }
+    }
+
+    /// Moves the preview to `top`, within what was last drawn. Never an
+    /// answer.
+    fn scroll_to(&mut self, top: usize) -> Option<bool> {
+        self.top = top.min(self.last_top.get());
+        None
     }
 
     fn destructive(&self) -> bool {
@@ -187,14 +297,37 @@ mod tests {
         render_with(60, 14, |frame| modal.render(frame, frame.area()))
     }
 
-    #[test]
-    fn a_mutating_confirmation_accepts_y_and_declines_n_and_esc() {
-        let (mut yes, mut answer) = modal(Class::Mutate);
-        assert!(yes.handle(ch('y')));
-        assert_eq!(answer.try_recv(), Ok(true));
+    fn enter() -> KeyEvent {
+        key(KeyCode::Enter)
+    }
 
+    #[test]
+    fn a_mutating_confirmation_needs_y_and_then_enter() {
+        let (mut modal, mut answer) = modal(Class::Mutate);
+
+        assert!(!modal.handle(ch('y')), "y alone does not answer");
+        assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+
+        assert!(modal.handle(enter()));
+        assert_eq!(answer.try_recv(), Ok(true));
+    }
+
+    #[test]
+    fn yes_in_any_case_proceeds() {
+        let (mut modal, mut answer) = modal(Class::Mutate);
+        let mut keys = typed(" YES ");
+        keys.push(enter());
+
+        assert!(press(&mut modal, &keys));
+
+        assert_eq!(answer.try_recv(), Ok(true));
+    }
+
+    #[test]
+    fn n_and_enter_or_esc_declines_a_mutating_confirmation() {
         let (mut no, mut answer) = modal(Class::Mutate);
-        assert!(no.handle(ch('n')));
+        assert!(!no.handle(ch('n')), "n alone does not answer");
+        assert!(no.handle(enter()));
         assert_eq!(answer.try_recv(), Ok(false));
 
         let (mut esc, mut answer) = modal(Class::Mutate);
@@ -203,15 +336,124 @@ mod tests {
     }
 
     #[test]
-    fn enter_and_other_keys_leave_a_mutating_confirmation_open() {
+    fn enter_alone_leaves_a_mutating_confirmation_open() {
         let (mut modal, mut answer) = modal(Class::Mutate);
 
-        assert!(!press(
-            &mut modal,
-            &[key(KeyCode::Enter), ch('x'), key(KeyCode::Tab)]
-        ));
+        assert!(!press(&mut modal, &[enter(), enter(), key(KeyCode::Tab)]));
 
         assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+        assert!(!drawn(&modal).contains("type y or n"));
+    }
+
+    #[test]
+    fn text_that_merely_contains_a_y_is_not_a_yes() {
+        let (mut modal, mut answer) = modal(Class::Mutate);
+        let mut keys = typed("my-key");
+        keys.push(enter());
+
+        assert!(!press(&mut modal, &keys));
+
+        assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+        assert!(drawn(&modal).contains("type y or n"), "{}", drawn(&modal));
+    }
+
+    fn long_preview(class: Class) -> (ConfirmModal, oneshot::Receiver<bool>) {
+        let body: String = (1..=40).map(|i| format!("change {i:02}\n")).collect();
+        let (request, answer) = ConfirmRequest::new(ConfirmSpec {
+            preview: vec![View::Doc {
+                title: String::new(),
+                body,
+                lang: String::new(),
+            }],
+            ..spec(class)
+        });
+        (ConfirmModal::new(request), answer)
+    }
+
+    #[test]
+    fn a_preview_longer_than_the_modal_says_how_much_is_shown() {
+        let (modal, _answer) = long_preview(Class::Mutate);
+
+        let text = drawn(&modal);
+
+        assert!(text.contains("change 01"), "{text}");
+        assert!(!text.contains("change 40"), "{text}");
+        assert!(text.contains("lines 1–6 of 40"), "{text}");
+    }
+
+    #[test]
+    fn the_preview_scrolls_to_its_last_line_and_stops() {
+        let (mut modal, mut answer) = long_preview(Class::Destructive);
+        drawn(&modal);
+
+        modal.handle(key(KeyCode::Down));
+        assert!(drawn(&modal).contains("lines 2–"), "{}", drawn(&modal));
+
+        for _ in 0..20 {
+            modal.handle(key(KeyCode::PageDown));
+            drawn(&modal);
+        }
+        let text = drawn(&modal);
+        assert!(text.contains("change 40"), "{text}");
+        assert!(text.contains("of 40"), "{text}");
+
+        for _ in 0..20 {
+            modal.handle(key(KeyCode::PageUp));
+            drawn(&modal);
+        }
+        assert!(drawn(&modal).contains("lines 1–"));
+        assert_eq!(
+            answer.try_recv(),
+            Err(TryRecvError::Empty),
+            "scrolling answers nothing"
+        );
+    }
+
+    #[test]
+    fn a_preview_that_fits_shows_no_scroll_marker() {
+        let (modal, _answer) = modal(Class::Mutate);
+
+        assert!(!drawn(&modal).contains("lines 1–"));
+    }
+
+    #[test]
+    fn a_preview_line_wider_than_the_modal_is_wrapped_not_cut() {
+        let wide = format!("{}END", "x".repeat(70));
+        let (request, _answer) = ConfirmRequest::new(ConfirmSpec {
+            preview: vec![View::Doc {
+                title: String::new(),
+                body: wide,
+                lang: String::new(),
+            }],
+            ..spec(Class::Mutate)
+        });
+        let modal = ConfirmModal::new(request);
+
+        let text = drawn(&modal);
+
+        assert!(text.contains("END"), "{text}");
+    }
+
+    #[test]
+    fn a_resource_name_wider_than_the_modal_is_shown_in_full() {
+        let name = format!("orders-{}-dev", "long".repeat(15));
+        let (request, mut answer) = ConfirmRequest::new(ConfirmSpec {
+            resource: name.clone(),
+            ..spec(Class::Destructive)
+        });
+        let mut modal = ConfirmModal::new(request);
+
+        let text = drawn(&modal);
+        let joined: String = text
+            .lines()
+            .map(|line| line.trim_matches(|c| c == '│' || c == ' '))
+            .collect();
+        assert!(joined.contains(&name), "{text}");
+
+        let mut keys = typed(&name);
+        keys.push(enter());
+        assert!(press(&mut modal, &keys));
+        assert_eq!(answer.try_recv(), Ok(true));
     }
 
     #[test]

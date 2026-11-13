@@ -60,6 +60,28 @@ pub fn slice_columns(line: &str, skip: usize, width: usize) -> String {
     out
 }
 
+/// The single line `line` broken into rows of at most `width` columns, never
+/// splitting a character. A width of zero leaves the line whole.
+pub fn wrap_columns(line: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![line.to_owned()];
+    }
+    let mut rows = vec![String::new()];
+    let mut used = 0;
+    for grapheme in line.graphemes(true) {
+        let cols = grapheme.width();
+        if used > 0 && used + cols > width {
+            rows.push(String::new());
+            used = 0;
+        }
+        if let Some(row) = rows.last_mut() {
+            row.push_str(grapheme);
+        }
+        used += cols;
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,6 +113,29 @@ mod tests {
     fn plain_text_is_unchanged() {
         assert_eq!(clean("key : value — ✓ 日本"), "key : value — ✓ 日本");
         assert_eq!(clean(""), "");
+    }
+
+    #[test]
+    fn a_line_is_wrapped_into_rows_of_the_given_width() {
+        assert_eq!(wrap_columns("abcdefgh", 3), ["abc", "def", "gh"]);
+        assert_eq!(wrap_columns("abc", 3), ["abc"]);
+        assert_eq!(wrap_columns("abc", 10), ["abc"]);
+    }
+
+    #[test]
+    fn an_empty_line_wraps_to_one_empty_row() {
+        assert_eq!(wrap_columns("", 5), [""]);
+    }
+
+    #[test]
+    fn a_wide_character_moves_to_the_next_row_rather_than_being_split() {
+        assert_eq!(wrap_columns("a日本語", 3), ["a日", "本", "語"]);
+    }
+
+    #[test]
+    fn a_width_too_small_for_a_character_still_makes_progress() {
+        assert_eq!(wrap_columns("日本", 1), ["日", "本"]);
+        assert_eq!(wrap_columns("ab", 0), ["ab"]);
     }
 
     #[test]

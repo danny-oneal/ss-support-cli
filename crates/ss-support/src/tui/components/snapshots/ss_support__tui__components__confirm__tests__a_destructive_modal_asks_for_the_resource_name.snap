@@ -5,14 +5,14 @@ expression: drawn(&modal)
 ┌ confirm ─────────────────────────────────────────────────┐
 │s3.restore-version (destructive)                          │
 │Step "copy the version" will change:                      │
-│                                                          │
 │Bucket : config-dev                                       │
 │Key    : orders-dev                                       │
 │                                                          │
 │                                                          │
 │                                                          │
 │                                                          │
-│This is DESTRUCTIVE. Type "orders-dev" to confirm:        │
+│This is DESTRUCTIVE. Type this name, then enter:          │
+│orders-dev                                                │
 │> orders                                                  │
-│enter confirm · esc decline                               │
+│enter answer · esc decline                                │
 └──────────────────────────────────────────────────────────┘

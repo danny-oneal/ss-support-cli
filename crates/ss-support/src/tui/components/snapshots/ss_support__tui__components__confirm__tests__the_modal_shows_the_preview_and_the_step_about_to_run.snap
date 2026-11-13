@@ -5,7 +5,6 @@ expression: drawn(&modal)
 ┌ confirm ─────────────────────────────────────────────────┐
 │s3.restore-version (mutate)                               │
 │Step "copy the version" will change:                      │
-│                                                          │
 │Bucket : config-dev                                       │
 │Key    : orders-dev                                       │
 │                                                          │
@@ -13,6 +12,7 @@ expression: drawn(&modal)
 │                                                          │
 │                                                          │
 │                                                          │
-│Proceed with s3.restore-version? [y/n]                    │
-│y proceed · n or esc decline                              │
+│Proceed with s3.restore-version? Type y or n, then enter: │
+│>                                                         │
+│enter answer · esc decline                                │
 └──────────────────────────────────────────────────────────┘

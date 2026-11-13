@@ -1186,10 +1186,10 @@ mod tests {
         let (op, done) = write_op(Class::Mutate);
         let mut shell = shell_with(ctx(), op, "x");
         press(&mut shell, &[enter()]);
-        let shown = settle(&mut shell, "Proceed with stub.op? [y/n]").await;
+        let shown = settle(&mut shell, "Proceed with stub.op?").await;
         assert!(shown.contains("Will change : orders-dev"), "{shown}");
 
-        press(&mut shell, &[ch('y')]);
+        press(&mut shell, &[ch('y'), enter()]);
         let shown = settle(&mut shell, "view 1/1").await;
 
         assert!(shown.contains("Changed : orders-dev"), "{shown}");
@@ -1220,7 +1220,7 @@ mod tests {
         let (op, done) = write_op(Class::Mutate);
         let mut shell = shell_with(ctx(), op, "x");
         press(&mut shell, &[enter()]);
-        settle(&mut shell, "Proceed with stub.op? [y/n]").await;
+        settle(&mut shell, "Proceed with stub.op?").await;
 
         assert!(
             shell.handle(None, Msg::Key(ctrl('c'))),
