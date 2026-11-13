@@ -69,6 +69,13 @@ Cross-milestone failure modes most likely to hurt an operator; each gets a test 
 
 **Exit criteria:** the plan's end-to-end tests are green; the manual terminal-restore walkthrough is done and recorded; README has the key table; `[Unreleased]` lists the TUI.
 
+**Status (2026-11-12): landed on branch `tui-core`.** 17 end-to-end tests drive the real event loop on an in-memory terminal; about 200 unit tests cover the screens and components. The real binary was driven on a pseudo-terminal: picker, filter, form, a `demo.hello` run, and export all work, and the terminal is restored after `q` and after SIGTERM (exit 130). Not checked by hand or machine: a second signal during shutdown, a panic in a release build, and the S3 browser against MinIO on a real terminal. Decisions taken during the work that differ from the task plan:
+- Ctrl-C goes back one screen everywhere except the operation list (where it quits) and a run (where it cancels or declines).
+- A param's default is shown as a placeholder, not filled in, so presets keep holding only chosen values.
+- The S3 browser passes both marked versions by id; the newer one is not turned into `null` even when it is the latest.
+- A panic while the TUI holds the terminal restores it and ends the process, in debug builds as in release builds.
+- Bare `&str` widgets are never drawn directly: ratatui does not clip them to an empty area, which panicked on very small terminals.
+
 ## M2 — Pods and logs screens → 0.1.0-alpha.6
 
 **Deliverable:** `p` on the picker opens a pod list for a namespace; enter on a pod tails its log.

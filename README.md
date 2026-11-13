@@ -59,6 +59,45 @@ config/presets file · `130` interrupted by Ctrl-C, SIGTERM, or SIGHUP (a second
 signal exits at once). A failed audit-log write is a `warning:` line on stderr
 and does not change the exit code.
 
+## TUI
+
+`ss-support` with no subcommand opens an interactive front-end when stdin and
+stdout are both terminals; piped or redirected, it prints the help instead.
+It runs the same operations through the same environment allowlist,
+confirmation, and audit log as `ss-support run`.
+
+```bash
+ss-support                      # pick an operation, fill in its params, run it
+ss-support --env staging        # the same, against another environment
+ss-support --dry-run            # every run stops before its first mutating step
+```
+
+`--env`, `--profile`, `--region`, `--context`, `--no-cache`, `--dry-run`, and
+`--yes` apply as they do to `ss-support run`. `-o`, `--export`, and `-v` have
+no effect here: results are shown on screen and exported with `e`.
+
+| screen | keys |
+|---|---|
+| Operations | `↑` `↓` move · `enter` open · `/` filter by name (then `↑` `↓`, `enter`, `esc` to clear) · `b` browse S3 · `q` or `esc` quit |
+| Form | `tab` `shift+tab` `↑` `↓` move between params · `↓` into the suggestions, `enter` to take one · `enter` run · `ctrl+p` load a preset · `ctrl+s` save a preset · `esc` back |
+| Run | `ctrl+c` or `esc` cancel · `esc` back once it has ended |
+| Confirm | `y` / `n` for a mutating operation · type the resource name and `enter` for a destructive one · `esc` decline |
+| Result | `tab` `shift+tab` next/previous view · `↑` `↓` `←` `→` `pgup` `pgdn` `g` scroll · `e` export a markdown report · `ctrl+s` save a preset · `esc` back |
+| Diff view | `n` `p` next/previous change · `pgup` `pgdn` ten changes · `g` first change · `s` unified or side-by-side · `c` one line per change · `/` filter by path |
+| S3 browser | `↑` `↓` move · `enter` open a bucket, prefix, or an object's versions · `space` mark a version · `d` compare the two marked versions · `r` reload · `esc` up |
+
+`ctrl+c` cancels a run, declines a confirmation, quits from the operation
+list, and goes back one screen anywhere else. A form shows a param's default
+as `default: …` rather than filling it in, so a saved preset holds only the
+values that were typed. `e` writes `ss-support-<operation>-<timestamp>.md`
+into the working directory. `d` in the S3 browser opens `s3.version-diff`
+with the bucket, key, and both version ids filled in, the older version as
+`a`.
+
+Leaving the TUI exits `0`; SIGTERM or SIGHUP exits `130`. The terminal is
+restored on every way out. A terminal smaller than 20x6 shows only
+`terminal too small`.
+
 ## S3
 
 Three operations read from S3. All are read-only: they never write, copy, or
