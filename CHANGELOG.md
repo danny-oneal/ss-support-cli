@@ -6,13 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.5] - 2026-11-13
+
 ### Added
 - An interactive TUI: `ss-support` with no subcommand, on a terminal, opens a
   list of every operation with a fuzzy filter. Choosing one shows a form of
   its params (with suggestions, saved presets, and defaults shown but not
-  filled in), runs it with a live step list, asks the same confirmation as
-  `ss-support run` (the typed resource name for a destructive operation), and
-  shows the result one view at a time.
+  filled in), runs it with a live step list, and shows the result one view at
+  a time. Runs go through the same environment allowlist and audit log as
+  `ss-support run`.
+- Confirmation in the TUI is always a typed answer ended with enter: `y` for
+  a mutating operation, the resource name for a destructive one. `--yes` has
+  no effect there. The preview of what will change scrolls when it is longer
+  than the screen. Keys typed or pasted before a confirmation could be read
+  do not answer it.
 - A diff view in the TUI: step through changes, switch between unified and
   side-by-side, collapse to one line per change, and filter by path.
 - An S3 browser in the TUI (`b`): buckets, prefixes, objects, and an object's
@@ -23,6 +30,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 - A bare `ss-support` prints the help only when stdin or stdout is not a
   terminal; on a terminal it opens the TUI.
+
+### Fixed
+- Text tables and summaries line up when a cell or key holds wide characters
+  (CJK, for example): columns are padded by display width, not by character
+  count. This applies to `ss-support run` output as well.
 
 ## [0.1.0-alpha.4] - 2026-11-10
 

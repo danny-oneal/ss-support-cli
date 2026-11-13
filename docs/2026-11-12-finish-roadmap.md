@@ -69,12 +69,18 @@ Cross-milestone failure modes most likely to hurt an operator; each gets a test 
 
 **Exit criteria:** the plan's end-to-end tests are green; the manual terminal-restore walkthrough is done and recorded; README has the key table; `[Unreleased]` lists the TUI.
 
-**Status (2026-11-12): landed on branch `tui-core`.** 17 end-to-end tests drive the real event loop on an in-memory terminal; about 200 unit tests cover the screens and components. The real binary was driven on a pseudo-terminal: picker, filter, form, a `demo.hello` run, and export all work, and the terminal is restored after `q` and after SIGTERM (exit 130). Not checked by hand or machine: a second signal during shutdown, a panic in a release build, and the S3 browser against MinIO on a real terminal. Decisions taken during the work that differ from the task plan:
-- Ctrl-C goes back one screen everywhere except the operation list (where it quits) and a run (where it cancels or declines).
+**Status (2026-11-13): landed on branch `tui-core` as 0.1.0-alpha.5, reviewed by a fresh reviewer, review findings fixed.** 19 end-to-end tests drive the real event loop on an in-memory terminal; about 230 unit tests cover the screens and components. The real binary was driven on a pseudo-terminal: picker, filter, form, and a `demo.hello` run work, and the terminal is restored after `q`, after SIGTERM (exit 130), and after a panic in an operation (30 of 30 runs of a debug probe build: exit 101, cursor shown, nothing drawn afterwards). Not checked by hand or machine: a second signal during shutdown, a panic in a release build, the S3 browser against MinIO on a real terminal, and how the colours look.
+
+Decisions taken during the work that differ from the task plan:
+- Ctrl-C goes back one screen everywhere except the operation list (where it quits) and a run (where it cancels or declines). Esc goes back and never quits.
+- A confirmation is always typed and ended with enter (`y` for a mutating operation, the resource name for a destructive one), and `--yes` has no effect in the TUI. Keys and pastes are dropped for 250 ms after a question or a result appears.
 - A param's default is shown as a placeholder, not filled in, so presets keep holding only chosen values.
-- The S3 browser passes both marked versions by id; the newer one is not turned into `null` even when it is the latest.
+- The S3 browser passes both marked versions by id; the newer one is not turned into `null` even when it is the latest. A version whose id is `null` and which is not the latest is refused.
 - A panic while the TUI holds the terminal restores it and ends the process, in debug builds as in release builds.
+- Leaving the TUI cancels runs in flight and waits up to five seconds for their audit entries.
 - Bare `&str` widgets are never drawn directly: ratatui does not clip them to an empty area, which panicked on very small terminals.
+
+Carried into later milestones from the review: keep a run's warnings (a failed audit write) on the result screen for writes, and consider an audit entry written when a write starts, not only when it ends (M3); drain several background results per redraw before adding a log stream (M2).
 
 ## M2 — Pods and logs screens → 0.1.0-alpha.6
 

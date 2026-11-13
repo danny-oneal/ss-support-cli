@@ -63,8 +63,8 @@ and does not change the exit code.
 
 `ss-support` with no subcommand opens an interactive front-end when stdin and
 stdout are both terminals; piped or redirected, it prints the help instead.
-It runs the same operations through the same environment allowlist,
-confirmation, and audit log as `ss-support run`.
+It runs the same operations through the same environment allowlist and audit
+log as `ss-support run`, and always asks before a run changes anything.
 
 ```bash
 ss-support                      # pick an operation, fill in its params, run it
@@ -72,31 +72,43 @@ ss-support --env staging        # the same, against another environment
 ss-support --dry-run            # every run stops before its first mutating step
 ```
 
-`--env`, `--profile`, `--region`, `--context`, `--no-cache`, `--dry-run`, and
-`--yes` apply as they do to `ss-support run`. `-o`, `--export`, and `-v` have
-no effect here: results are shown on screen and exported with `e`.
+`--env`, `--profile`, `--region`, `--context`, `--no-cache`, and `--dry-run`
+apply as they do to `ss-support run`. `--yes` has no effect here: an operator
+who is present is always asked. `-o`, `--export`, and `-v` have no effect
+either: results are shown on screen and exported with `e`.
 
 | screen | keys |
 |---|---|
-| Operations | `↑` `↓` move · `enter` open · `/` filter by name (then `↑` `↓`, `enter`, `esc` to clear) · `b` browse S3 · `q` or `esc` quit |
+| Operations | `↑` `↓` move · `enter` open · `/` filter by name (then `↑` `↓`, `enter`, `esc` to clear) · `b` browse S3 · `q` quit |
 | Form | `tab` `shift+tab` `↑` `↓` move between params · `↓` into the suggestions, `enter` to take one · `enter` run · `ctrl+p` load a preset · `ctrl+s` save a preset · `esc` back |
 | Run | `ctrl+c` or `esc` cancel · `esc` back once it has ended |
-| Confirm | `y` / `n` for a mutating operation · type the resource name and `enter` for a destructive one · `esc` decline |
+| Confirm | type `y` (or `n`) and `enter` for a mutating operation · type the resource name and `enter` for a destructive one · `↑` `↓` `pgup` `pgdn` scroll the preview · `esc` decline |
 | Result | `tab` `shift+tab` next/previous view · `↑` `↓` `←` `→` `pgup` `pgdn` `g` scroll · `e` export a markdown report · `ctrl+s` save a preset · `esc` back |
 | Diff view | `n` `p` next/previous change · `pgup` `pgdn` ten changes · `g` first change · `s` unified or side-by-side · `c` one line per change · `/` filter by path |
 | S3 browser | `↑` `↓` move · `enter` open a bucket, prefix, or an object's versions · `space` mark a version · `d` compare the two marked versions · `r` reload · `esc` up |
 
 `ctrl+c` cancels a run, declines a confirmation, quits from the operation
-list, and goes back one screen anywhere else. A form shows a param's default
-as `default: …` rather than filling it in, so a saved preset holds only the
-values that were typed. `e` writes `ss-support-<operation>-<timestamp>.md`
-into the working directory. `d` in the S3 browser opens `s3.version-diff`
-with the bucket, key, and both version ids filled in, the older version as
-`a`.
+list, and goes back one screen anywhere else. `esc` goes back and never quits.
 
-Leaving the TUI exits `0`; SIGTERM or SIGHUP exits `130`. The terminal is
-restored on every way out. A terminal smaller than 20x6 shows only
-`terminal too small`.
+A confirmation is always a typed answer ended with `enter`, so one stray key
+cannot proceed. Keys are ignored for a quarter of a second after a
+confirmation or a result appears, and pasted text is only ever text for the
+field being edited: it cannot press `enter`, answer a confirmation, or act as
+a command key. A preview longer than the screen scrolls and says which lines
+are shown.
+
+A form shows a param's default as `default: …` rather than filling it in, so
+a saved preset holds only the values that were typed. `e` writes
+`ss-support-<operation>-<timestamp>.md` into the working directory. `d` in
+the S3 browser opens `s3.version-diff` with the bucket, key, and both version
+ids filled in, the older version as `a`; a version whose id is `null` (an
+object written before versioning was enabled) can be compared this way only
+when it is the latest.
+
+Leaving the TUI exits `0`; SIGTERM or SIGHUP exits `130`. A run still in
+flight is cancelled first and given up to five seconds to stop and write its
+audit entry. The terminal is restored on every way out. A terminal smaller
+than 20x6 shows only `terminal too small`.
 
 ## S3
 
