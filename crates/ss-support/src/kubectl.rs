@@ -751,6 +751,36 @@ exit 1"#;
         assert_gone(&pid).await;
     }
 
+    // Nothing else is spawned here, so only the adapter itself can have
+    // collected the process it killed.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_stopped_log_stream_is_reaped_without_another_kubectl_call() {
+        let _serial = serial().await;
+        let dir = TempDir::new().expect("tempdir");
+        let bin = stub(
+            &dir,
+            r#"trap '' PIPE; echo $$ > "$0.pid"; while true; do echo tick; sleep 0.05; done"#,
+        );
+        let mut rx = exec(&bin)
+            .logs("default", "pod-a", true)
+            .await
+            .expect("start stream");
+        assert_eq!(rx.recv().await.as_deref(), Some("tick"));
+        let pid = pid_of(&bin).await;
+
+        drop(rx);
+
+        let entry = PathBuf::from(format!("/proc/{pid}"));
+        for _ in 0..100 {
+            if !entry.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("process {pid} was stopped but is still in the process table");
+    }
+
     /// A script that writes a marked first line, over 64 KiB of filler, and a
     /// marked last line to stderr, then fails.
     const CHATTY_FAILURE: &str = r#"echo FIRST-LINE-MARKER >&2
