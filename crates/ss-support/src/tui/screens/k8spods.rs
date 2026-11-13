@@ -16,6 +16,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::components::errorpanel::render_error;
 use crate::tui::components::prompt::Prompt;
 use crate::tui::screen::{Cmd, Ctx, Loaded, Msg, Screen};
+use crate::tui::screens::logstail::LogsTail;
 use crate::tui::text::clean;
 use crate::tui::theme;
 
@@ -167,9 +168,16 @@ impl K8sPods {
         Vec::new()
     }
 
-    /// Opens the selected pod.
-    fn open(&self, _ctx: &Ctx) -> Vec<Cmd> {
-        Vec::new()
+    /// Opens the log of the selected pod.
+    fn open(&self, ctx: &Ctx) -> Vec<Cmd> {
+        match self.pods.get(self.selected) {
+            Some(pod) => vec![Cmd::Push(Box::new(LogsTail::new(
+                &self.namespace,
+                &pod.name,
+                ctx,
+            )))],
+            None => Vec::new(),
+        }
     }
 
     /// The cells of every row, headings first.
@@ -707,5 +715,38 @@ mod tests {
         render_screen(&screen, 0, 0);
         screen.update(Msg::Key(ch('n')), &ctx);
         render_screen(&screen, 1, 1);
+    }
+
+    #[tokio::test]
+    async fn enter_on_a_pod_opens_its_log() {
+        let mut shell = pod_list(ctx_with(seeded()));
+        settle(&mut shell, "api-7d9f").await;
+        press(&mut shell, &[key(KeyCode::Down), enter()]);
+        assert_eq!(shell.depth(), 2);
+        assert!(render_shell(&shell, 80, 24).contains("Logs — worker-5c2a"));
+
+        // In a named namespace the title says which.
+        let mut shell = pod_list(ctx_with(seeded()));
+        settle(&mut shell, "api-7d9f").await;
+        press(&mut shell, &[ch('n')]);
+        press(&mut shell, &typed("orders"));
+        press(&mut shell, &[enter()]);
+        settle(&mut shell, "orders-0").await;
+        press(&mut shell, &[enter()]);
+        assert!(render_shell(&shell, 80, 24).contains("Logs — orders/orders-0"));
+    }
+
+    #[tokio::test]
+    async fn enter_on_an_empty_list_opens_nothing() {
+        let mut shell = pod_list(ctx_with(seeded()));
+        settle(&mut shell, "api-7d9f").await;
+        press(&mut shell, &[ch('n')]);
+        press(&mut shell, &typed("empty"));
+        press(&mut shell, &[enter()]);
+        settle(&mut shell, "no pods in this namespace").await;
+
+        press(&mut shell, &[enter()]);
+
+        assert_eq!(shell.depth(), 1);
     }
 }
