@@ -13,6 +13,7 @@ mod io;
 mod kubectl;
 mod run;
 mod services;
+mod tui;
 
 pub use cli::{
     Cli, Command, GlobalFlags, OpCall, OpsCmd, Output, PresetsCmd, RunCmd, command, parse_from,
