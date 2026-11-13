@@ -1,9 +1,6 @@
 //! The interactive terminal front-end: a stack of screens over the same
 //! operations, guard, confirmation, and audit trail the command line uses.
 
-// Nothing outside this module calls into it yet.
-#![allow(dead_code)]
-
 pub mod bridge;
 pub mod components;
 pub mod presets;
@@ -22,11 +19,68 @@ pub(crate) mod testing;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use anyhow::Context;
+use futures_util::Stream;
+use ratatui::Terminal;
+use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::crossterm::cursor::{Hide, Show};
+use ratatui::crossterm::event::{Event, EventStream};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use ss_core::ops::Registry;
+
+use crate::run::{App, Failure};
+
+use screen::Ctx;
+pub use screen::RunFlags;
+use screens::opspicker::OpsPicker;
+use shell::{Shell, Stop};
+
+/// Runs the TUI on the process's terminal until the operator leaves it.
+/// The terminal is taken over for the duration and put back on every way
+/// out, a panic included.
+pub(crate) async fn launch(registry: &Registry, app: &App, flags: RunFlags) -> Result<(), Failure> {
+    install_panic_hook();
+    let mut out = io::stdout();
+    let guard = TermGuard::enter(&mut out)
+        .context("take over the terminal")
+        .map_err(Failure::Failed)?;
+    let outcome = match Terminal::new(CrosstermBackend::new(out)) {
+        Ok(mut term) => run_on(registry, app, flags, &mut term, EventStream::new()).await,
+        Err(e) => Err(Failure::Failed(
+            anyhow::Error::new(e).context("open the terminal"),
+        )),
+    };
+    // The terminal is put back before any error is reported on it.
+    drop(guard);
+    outcome
+}
+
+/// Runs the TUI on `term`, fed by `events`, starting on the operation
+/// picker. Leaving the TUI is a success; an invocation cancelled from
+/// outside is an interruption.
+pub(crate) async fn run_on<B, S>(
+    registry: &Registry,
+    app: &App,
+    flags: RunFlags,
+    term: &mut Terminal<B>,
+    events: S,
+) -> Result<(), Failure>
+where
+    B: Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
+    S: Stream<Item = io::Result<Event>> + Unpin,
+{
+    let ctx = Ctx::from_app(app, registry, flags);
+    let shell = Shell::new(ctx, Box::new(OpsPicker::new(registry)));
+    match shell.run_with(term, events).await {
+        Ok(Stop::Quit) => Ok(()),
+        Ok(Stop::Interrupted) => Err(Failure::Interrupted(anyhow::anyhow!("interrupted"))),
+        Err(e) => Err(Failure::Failed(e)),
+    }
+}
 
 /// Whether the terminal is in the TUI's mode and still has to be put back.
 struct Entered(AtomicBool);

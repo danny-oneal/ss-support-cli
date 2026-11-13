@@ -213,7 +213,7 @@ impl Screen for Probe {
                 KeyCode::Char(c) => format!("key:{c}"),
                 other => format!("key:{other:?}"),
             },
-            Msg::Resize(w, h) => format!("resize:{w}x{h}"),
+            Msg::Resize => "resize".to_owned(),
             Msg::Progress(p) => format!("progress:{}", p.step),
             Msg::Warning(w) => format!("warning:{w}"),
             Msg::Confirm(c) => format!("confirm:{}", c.spec.op_id),

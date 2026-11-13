@@ -173,8 +173,8 @@ impl Shell {
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
                         self.handle(None, Msg::Key(key))
                     }
-                    Some(Ok(Event::Resize(width, height))) => {
-                        self.handle(None, Msg::Resize(width, height))
+                    Some(Ok(Event::Resize(..))) => {
+                        self.handle(None, Msg::Resize)
                     }
                     Some(Ok(_)) => true,
                 },
@@ -622,7 +622,7 @@ mod tests {
         assert!(screen_text(&term).contains("root body"));
         assert_eq!(
             entries(&log),
-            ["root:init", "root:resize:80x24", "root:key:a", "root:key:q"]
+            ["root:init", "root:resize", "root:key:a", "root:key:q"]
         );
     }
 

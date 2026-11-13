@@ -433,7 +433,7 @@ impl Screen for OpsForm {
                 Loaded::Buckets(_) | Loaded::Page(_) | Loaded::Versions(_) => Vec::new(),
             },
             Msg::Loaded(..)
-            | Msg::Resize(..)
+            | Msg::Resize
             | Msg::Progress(_)
             | Msg::Warning(_)
             | Msg::Confirm(_)
@@ -589,7 +589,7 @@ impl Screen for ProgressScreen {
                     self.cancel.cancel();
                 }
             }
-            Msg::Resize(..) | Msg::Loaded(..) => {}
+            Msg::Resize | Msg::Loaded(..) => {}
         }
         Vec::new()
     }

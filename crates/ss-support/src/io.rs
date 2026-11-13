@@ -3,7 +3,7 @@
 //! tests can capture everything in memory.
 
 use std::fmt;
-use std::io::{self, BufRead, BufReader, Cursor, Write};
+use std::io::{self, BufRead, BufReader, Cursor, IsTerminal, Write};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// A cloneable, thread-safe output stream. Clones write to the same
@@ -88,6 +88,9 @@ pub struct Io {
     pub stderr: Sink,
     /// Supplies answers to prompts.
     pub stdin: Source,
+    /// Whether an operator is at a terminal on both ends: stdin and stdout
+    /// are terminals. Only then can the interactive front-end be shown.
+    pub is_terminal: bool,
 }
 
 impl Io {
@@ -97,6 +100,7 @@ impl Io {
             stdout: Sink::new(io::stdout()),
             stderr: Sink::new(io::stderr()),
             stdin: Source::new(BufReader::new(io::stdin())),
+            is_terminal: io::stdin().is_terminal() && io::stdout().is_terminal(),
         }
     }
 
@@ -108,6 +112,7 @@ impl Io {
             stdout: Sink::new(Buffer(Arc::clone(&captured.stdout))),
             stderr: Sink::new(Buffer(Arc::clone(&captured.stderr))),
             stdin: Source::new(Cursor::new(stdin.as_bytes().to_vec())),
+            is_terminal: false,
         };
         (io, captured)
     }

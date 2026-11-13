@@ -70,7 +70,8 @@ impl TextInput {
     }
 
     /// How many terminal columns the text before the cursor occupies.
-    pub fn cursor_col(&self) -> u16 {
+    #[cfg(test)]
+    pub(crate) fn cursor_col(&self) -> u16 {
         u16::try_from(columns(self.before_cursor())).unwrap_or(u16::MAX)
     }
 

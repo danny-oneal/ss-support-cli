@@ -59,7 +59,8 @@ impl DiffViewer {
     }
 
     /// The current layout.
-    pub fn mode(&self) -> Mode {
+    #[cfg(test)]
+    pub(crate) fn mode(&self) -> Mode {
         self.mode
     }
 

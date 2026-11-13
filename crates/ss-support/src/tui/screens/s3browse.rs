@@ -447,7 +447,7 @@ impl Screen for S3Browse {
             Msg::Key(key) => self.on_key(key, ctx),
             Msg::Loaded(request, loaded) if request == self.request => self.arrived(loaded),
             Msg::Loaded(..)
-            | Msg::Resize(..)
+            | Msg::Resize
             | Msg::Progress(_)
             | Msg::Warning(_)
             | Msg::Confirm(_)

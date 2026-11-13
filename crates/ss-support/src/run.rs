@@ -6,6 +6,10 @@ use std::future::Future;
 use std::io::Write;
 use std::sync::Arc;
 
+use futures_util::Stream;
+use ratatui::Terminal;
+use ratatui::backend::Backend;
+use ratatui::crossterm::event::Event;
 use ss_core::audit::{self, FileLogger, Logger};
 use ss_core::cache;
 use ss_core::config::{self, ConfigError};
@@ -20,6 +24,7 @@ use crate::cli::{Cli, GlobalFlags};
 use crate::cmd;
 use crate::io::Io;
 use crate::services::{DdbFactory, KubectlFactory, S3Factory, Services};
+use crate::tui::{self, RunFlags};
 
 /// Process exit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +207,51 @@ where
             let _ = writeln!(io.stderr.clone(), "{}: {e:#}", cli.prefix());
             exit
         }
+    }
+}
+
+/// Runs the interactive front-end on `term`, fed by `events` and cancelled
+/// when `interrupt` resolves, so tests can drive it with scripted keys on an
+/// in-memory terminal. The global flags of `cli` apply; its subcommand, if
+/// any, is ignored. Nothing is written outside `term`.
+pub async fn run_tui_with<B, S, F>(
+    cli: Cli,
+    services: Services,
+    term: &mut Terminal<B>,
+    events: S,
+    interrupt: F,
+) -> Exit
+where
+    B: Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
+    S: Stream<Item = std::io::Result<Event>> + Unpin,
+    F: Future<Output = ()> + Send + 'static,
+{
+    let cancel = CancellationToken::new();
+    let watcher = tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            interrupt.await;
+            cancel.cancel();
+        }
+    });
+    let result = async {
+        let app = App::build(
+            &cli.global,
+            &services.vars,
+            &services.s3,
+            &services.ddb,
+            &services.kubectl,
+            cancel,
+        )?;
+        let flags = RunFlags::of(&cli.global);
+        tui::run_on(&services.registry, &app, flags, term, events).await
+    }
+    .await;
+    watcher.abort();
+    match result {
+        Ok(()) => Exit::Ok,
+        Err(failure) => failure.into_parts().0,
     }
 }
 

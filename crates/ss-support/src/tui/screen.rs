@@ -20,6 +20,7 @@ use ss_core::svc::s3::{Bucket, Page, Version};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+use crate::cli::GlobalFlags;
 use crate::run::App;
 
 /// The global flags that change how an operation runs.
@@ -29,6 +30,16 @@ pub struct RunFlags {
     pub dry_run: bool,
     /// Auto-confirm mutating operations; never destructive ones.
     pub yes: bool,
+}
+
+impl RunFlags {
+    /// The run flags given on the command line.
+    pub fn of(global: &GlobalFlags) -> RunFlags {
+        RunFlags {
+            dry_run: global.dry_run,
+            yes: global.yes,
+        }
+    }
 }
 
 /// Everything screens share for one invocation.
@@ -138,8 +149,8 @@ pub enum Loaded {
 pub enum Msg {
     /// A key was pressed.
     Key(KeyEvent),
-    /// The terminal was resized to this many columns and rows.
-    Resize(u16, u16),
+    /// The terminal was resized.
+    Resize,
     /// A step of the screen's run changed state.
     Progress(Progress),
     /// The screen's run produced a warning.

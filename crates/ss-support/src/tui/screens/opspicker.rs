@@ -187,7 +187,7 @@ impl Screen for OpsPicker {
     fn update(&mut self, msg: Msg, ctx: &Ctx) -> Vec<Cmd> {
         match msg {
             Msg::Key(key) => self.on_key(key, ctx),
-            Msg::Resize(..)
+            Msg::Resize
             | Msg::Progress(_)
             | Msg::Warning(_)
             | Msg::Confirm(_)

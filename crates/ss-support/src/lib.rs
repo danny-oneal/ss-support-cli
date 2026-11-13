@@ -19,5 +19,5 @@ pub use cli::{
     Cli, Command, GlobalFlags, OpCall, OpsCmd, Output, PresetsCmd, RunCmd, command, parse_from,
 };
 pub use io::{Captured, Io, Sink, Source};
-pub use run::{Exit, run, run_with, run_with_interrupt};
+pub use run::{Exit, run, run_tui_with, run_with, run_with_interrupt};
 pub use services::{DdbFactory, KubectlFactory, S3Factory, Services};
