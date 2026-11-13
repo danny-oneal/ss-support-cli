@@ -161,6 +161,8 @@ pub(crate) struct Probe {
     log: Log,
     init: Option<InitScript>,
     script: MsgScript,
+    /// Counts how often the probe has been drawn.
+    draws: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl Probe {
@@ -171,7 +173,14 @@ impl Probe {
             log: Arc::clone(log),
             init: None,
             script: Box::new(|_| Vec::new()),
+            draws: None,
         }
+    }
+
+    /// Adds one to `draws` every time the probe is drawn.
+    pub(crate) fn count_draws(mut self, draws: &Arc<std::sync::atomic::AtomicUsize>) -> Probe {
+        self.draws = Some(Arc::clone(draws));
+        self
     }
 
     /// The commands returned when the screen is placed on the stack.
@@ -221,12 +230,18 @@ impl Screen for Probe {
             Msg::Confirm(c) => format!("confirm:{}", c.spec.op_id),
             Msg::RunDone(r) => format!("done:{}", if r.outcome.is_ok() { "ok" } else { "err" }),
             Msg::Loaded(id, _) => format!("loaded:{id}"),
+            Msg::Lines(id, lines) => format!("lines:{id}:{}", lines.join("|")),
+            Msg::StreamEnded(id, None) => format!("ended:{id}"),
+            Msg::StreamEnded(id, Some(error)) => format!("ended:{id}:{error}"),
         };
         self.note(&event);
         (self.script)(&msg)
     }
 
     fn view(&self, frame: &mut Frame, area: Rect) {
+        if let Some(draws) = &self.draws {
+            draws.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         frame.render_widget(Line::from(format!("{} body", self.name)), area);
     }
 }

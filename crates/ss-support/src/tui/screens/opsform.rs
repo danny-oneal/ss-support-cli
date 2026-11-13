@@ -461,7 +461,9 @@ impl Screen for OpsForm {
             | Msg::Progress(_)
             | Msg::Warning(_)
             | Msg::Confirm(_)
-            | Msg::RunDone(_) => Vec::new(),
+            | Msg::RunDone(_)
+            | Msg::Lines(..)
+            | Msg::StreamEnded(..) => Vec::new(),
         }
     }
 
@@ -625,7 +627,11 @@ impl Screen for ProgressScreen {
                     self.cancel.cancel();
                 }
             }
-            Msg::Resize | Msg::Paste(_) | Msg::Loaded(..) => {}
+            Msg::Resize
+            | Msg::Paste(_)
+            | Msg::Loaded(..)
+            | Msg::Lines(..)
+            | Msg::StreamEnded(..) => {}
         }
         Vec::new()
     }

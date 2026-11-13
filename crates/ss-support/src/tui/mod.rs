@@ -1,6 +1,9 @@
 //! The interactive terminal front-end: a stack of screens over the same
 //! operations, guard, confirmation, and audit trail the command line uses.
 
+// No screen opens a stream yet.
+#![allow(dead_code)]
+
 pub mod bridge;
 pub mod components;
 pub mod presets;

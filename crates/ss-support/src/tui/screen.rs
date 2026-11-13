@@ -18,7 +18,7 @@ use ss_core::ops::{
 };
 use ss_core::preset;
 use ss_core::svc::s3::{Bucket, Page, Version};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::cli::GlobalFlags;
@@ -153,6 +153,11 @@ pub enum Loaded {
     Failed(String),
 }
 
+/// Opens a stream of text lines, such as a log being followed. It resolves
+/// to the receiver the lines arrive on, or to the error to show when the
+/// stream cannot be opened. Dropping the receiver stops the source.
+pub type LineStream = BoxFuture<Result<mpsc::Receiver<String>, String>>;
+
 /// Something a screen is told about.
 pub enum Msg {
     /// A key was pressed.
@@ -173,6 +178,13 @@ pub enum Msg {
     /// A load the screen started with [`Cmd::Task`] finished; the number is
     /// the one the screen gave the task.
     Loaded(u64, Loaded),
+    /// More lines of the stream the screen opened with [`Cmd::Stream`] under
+    /// this number, oldest first. The next lines are read from the source
+    /// only after these have been delivered.
+    Lines(u64, Vec<String>),
+    /// The stream with this number is over: it reached its end, or it failed
+    /// with the error given.
+    StreamEnded(u64, Option<String>),
 }
 
 /// Something a screen asks the shell to do.
@@ -198,6 +210,10 @@ pub enum Cmd {
     /// Run this operation and deliver its progress, confirmation, and
     /// result to the asking screen.
     Run(RunRequest),
+    /// Open this stream and deliver its lines as [`Msg::Lines`] and its end
+    /// as [`Msg::StreamEnded`], both with the same number. The stream is
+    /// stopped when the asking screen leaves the stack.
+    Stream(u64, LineStream),
 }
 
 /// One full-screen view with its own state and keys.

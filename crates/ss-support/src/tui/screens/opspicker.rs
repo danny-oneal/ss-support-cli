@@ -203,7 +203,9 @@ impl Screen for OpsPicker {
             | Msg::Warning(_)
             | Msg::Confirm(_)
             | Msg::RunDone(_)
-            | Msg::Loaded(..) => Vec::new(),
+            | Msg::Loaded(..)
+            | Msg::Lines(..)
+            | Msg::StreamEnded(..) => Vec::new(),
         }
     }
 

@@ -3,6 +3,7 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -13,12 +14,12 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModif
 use ratatui::layout::{Constraint, Layout};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::sync::{Semaphore, mpsc};
+use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::screen::{Cmd, Ctx, Msg, Screen, ScreenId};
+use super::screen::{Cmd, Ctx, LineStream, Msg, Screen, ScreenId};
 use super::{bridge, theme};
 
 /// The smallest terminal the screens are drawn on.
@@ -29,6 +30,12 @@ const MIN_HEIGHT: u16 = 6;
 /// write their audit entries.
 pub const RUN_GRACE: Duration = Duration::from_secs(5);
 
+/// The most lines of a stream delivered to a screen at once.
+pub const STREAM_BATCH: usize = 256;
+
+/// The most background results delivered between two draws.
+const RESULTS_PER_DRAW: usize = 64;
+
 /// Why the event loop ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stop {
@@ -38,18 +45,67 @@ pub enum Stop {
     Interrupted,
 }
 
-/// One screen on the stack and the runs it started.
+/// One stream a screen has open.
+struct OpenStream {
+    number: u64,
+    /// Each permit lets the forwarder read one more batch from the source.
+    credit: Arc<Semaphore>,
+    forwarder: AbortHandle,
+}
+
+/// One screen on the stack, the runs it started, and the streams it opened.
 struct Entry {
     id: ScreenId,
     screen: Box<dyn Screen>,
     runs: Vec<CancellationToken>,
+    streams: Vec<OpenStream>,
 }
 
 impl Drop for Entry {
-    /// A run never outlives the screen that shows it.
+    /// Neither a run nor a stream outlives the screen that shows it.
     fn drop(&mut self) {
         for run in &self.runs {
             run.cancel();
+        }
+        for stream in &self.streams {
+            // Ending the forwarder drops the receiver, which stops the
+            // source.
+            stream.forwarder.abort();
+        }
+    }
+}
+
+/// Reads the stream `open` resolves to and hands its lines to `results` for
+/// the screen `screen`, one batch at a time: the next batch is read only
+/// once a permit says the previous one has been delivered, so a source that
+/// produces faster than the screen takes is held back rather than buffered.
+async fn forward(
+    screen: ScreenId,
+    number: u64,
+    open: LineStream,
+    credit: Arc<Semaphore>,
+    results: mpsc::UnboundedSender<(ScreenId, Msg)>,
+) {
+    let mut lines = match open.await {
+        Ok(lines) => lines,
+        Err(error) => {
+            // The shell may have closed while the stream was opening.
+            let _ = results.send((screen, Msg::StreamEnded(number, Some(error))));
+            return;
+        }
+    };
+    loop {
+        let Ok(permit) = credit.acquire().await else {
+            return;
+        };
+        permit.forget();
+        let mut batch = Vec::new();
+        if lines.recv_many(&mut batch, STREAM_BATCH).await == 0 {
+            let _ = results.send((screen, Msg::StreamEnded(number, None)));
+            return;
+        }
+        if results.send((screen, Msg::Lines(number, batch))).is_err() {
+            return;
         }
     }
 }
@@ -120,11 +176,28 @@ impl Shell {
         let Some(entry) = self.stack.get_mut(index) else {
             return true;
         };
+        let delivered_lines = match &msg {
+            Msg::Lines(number, _) => Some(*number),
+            _ => None,
+        };
+        let ended = match &msg {
+            Msg::StreamEnded(number, _) => Some(*number),
+            _ => None,
+        };
         let cmds = if interrupt {
             entry.screen.interrupt(&self.ctx)
         } else {
             entry.screen.update(msg, &self.ctx)
         };
+        // The screen has this batch, so the stream may read its next one.
+        if let Some(number) = delivered_lines
+            && let Some(stream) = entry.streams.iter().find(|s| s.number == number)
+        {
+            stream.credit.add_permits(1);
+        }
+        if let Some(number) = ended {
+            entry.streams.retain(|stream| stream.number != number);
+        }
         let id = entry.id;
         self.apply(id, cmds)
     }
@@ -220,12 +293,29 @@ impl Shell {
                     Some(Ok(Event::Resize(..))) => self.handle(None, Msg::Resize),
                     Some(Ok(_)) => true,
                 },
-                Some((id, msg)) = self.inbox.recv() => self.handle(Some(id), msg),
+                Some((id, msg)) = self.inbox.recv() => {
+                    self.handle(Some(id), msg) && self.deliver_waiting()
+                }
             };
             if !keep_going {
                 return Ok(Stop::Quit);
             }
         }
+    }
+
+    /// Delivers the background results that are already waiting, up to a
+    /// limit, so that a burst of them costs one draw rather than one each.
+    /// Returns false once the TUI should close.
+    fn deliver_waiting(&mut self) -> bool {
+        for _ in 1..RESULTS_PER_DRAW {
+            let Ok((id, msg)) = self.inbox.try_recv() else {
+                break;
+            };
+            if !self.handle(Some(id), msg) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Cancels every run and waits, up to [`RUN_GRACE`], for them to end.
@@ -247,6 +337,7 @@ impl Shell {
             id,
             screen,
             runs: Vec::new(),
+            streams: Vec::new(),
         });
         (id, cmds)
     }
@@ -303,6 +394,26 @@ impl Shell {
                     // Nobody is left to show the run, so it never starts.
                     None => request.cancel.cancel(),
                 },
+                Cmd::Stream(number, open) => {
+                    // A stream asked for by a screen that has gone is never
+                    // opened.
+                    if let Some(entry) = position.and_then(|index| self.stack.get_mut(index)) {
+                        let credit = Arc::new(Semaphore::new(1));
+                        let forwarder = tokio::spawn(forward(
+                            issuer,
+                            number,
+                            open,
+                            Arc::clone(&credit),
+                            self.results.clone(),
+                        ))
+                        .abort_handle();
+                        entry.streams.push(OpenStream {
+                            number,
+                            credit,
+                            forwarder,
+                        });
+                    }
+                }
             }
         }
         true
@@ -941,5 +1052,221 @@ mod tests {
         assert_eq!(stop, Stop::Interrupted);
         assert_eq!(started.elapsed(), RUN_GRACE);
         assert!(audit.0.lock().unwrap().is_empty(), "it never finished");
+    }
+
+    /// A stream that opens onto `lines`.
+    fn stream_of(lines: mpsc::Receiver<String>) -> crate::tui::screen::LineStream {
+        Box::pin(async move { Ok(lines) })
+    }
+
+    /// A shell whose root screen reads stream 4 from the returned sender.
+    fn shell_with_a_stream(log: &Log, capacity: usize) -> (Shell, mpsc::Sender<String>) {
+        let (tx, rx) = mpsc::channel(capacity);
+        let stream = stream_of(rx);
+        let root = Probe::new("root", log).on_init(move || vec![Cmd::Stream(4, stream)]);
+        (Shell::new(ctx(), Box::new(root)), tx)
+    }
+
+    async fn pump_in_time(shell: &mut Shell) {
+        tokio::time::timeout(Duration::from_secs(5), shell.pump())
+            .await
+            .expect("the stream reports to the shell");
+    }
+
+    #[tokio::test]
+    async fn stream_lines_reach_the_screen_that_asked_in_order() {
+        let log = log();
+        let (mut shell, tx) = shell_with_a_stream(&log, 8);
+        tx.send("one".to_owned()).await.unwrap();
+        tx.send("two".to_owned()).await.unwrap();
+
+        pump_in_time(&mut shell).await;
+        tx.send("three".to_owned()).await.unwrap();
+        pump_in_time(&mut shell).await;
+
+        assert_eq!(
+            entries(&log),
+            ["root:init", "root:lines:4:one|two", "root:lines:4:three"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closed_stream_ends_without_an_error() {
+        let log = log();
+        let (mut shell, tx) = shell_with_a_stream(&log, 8);
+        tx.send("last".to_owned()).await.unwrap();
+        drop(tx);
+
+        pump_in_time(&mut shell).await;
+        pump_in_time(&mut shell).await;
+
+        assert_eq!(
+            entries(&log),
+            ["root:init", "root:lines:4:last", "root:ended:4"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_cannot_open_ends_with_its_error() {
+        let log = log();
+        let root = Probe::new("root", &log).on_init(|| {
+            vec![Cmd::Stream(
+                4,
+                Box::pin(async { Err("Kubernetes is not configured".to_owned()) }),
+            )]
+        });
+        let mut shell = Shell::new(ctx(), Box::new(root));
+
+        pump_in_time(&mut shell).await;
+
+        assert_eq!(
+            entries(&log),
+            ["root:init", "root:ended:4:Kubernetes is not configured"]
+        );
+    }
+
+    #[tokio::test]
+    async fn popping_the_screen_drops_the_stream() {
+        let log = log();
+        let (tx, rx) = mpsc::channel(8);
+        let stream = stream_of(rx);
+        let child = popper("child", &log).on_init(move || vec![Cmd::Stream(4, stream)]);
+        let mut shell = Shell::new(ctx(), Box::new(pusher(&log, child)));
+        shell.handle(None, Msg::Key(ch('p')));
+        tx.send("one".to_owned()).await.unwrap();
+        pump_in_time(&mut shell).await;
+
+        shell.handle(None, Msg::Key(ch('x')));
+
+        tokio::time::timeout(Duration::from_secs(5), tx.closed())
+            .await
+            .expect("the receiver is dropped when the screen goes");
+    }
+
+    #[tokio::test]
+    async fn closing_the_shell_drops_every_stream() {
+        let log = log();
+        let (shell, tx) = shell_with_a_stream(&log, 8);
+        tokio::task::yield_now().await;
+
+        drop(shell);
+
+        tokio::time::timeout(Duration::from_secs(5), tx.closed())
+            .await
+            .expect("the receiver is dropped with the shell");
+    }
+
+    #[tokio::test]
+    async fn lines_for_a_screen_that_has_gone_are_dropped() {
+        let log = log();
+        let (tx, rx) = mpsc::channel(8);
+        let stream = stream_of(rx);
+        let child = popper("child", &log).on_init(move || vec![Cmd::Stream(4, stream)]);
+        let mut shell = Shell::new(ctx(), Box::new(pusher(&log, child)));
+        shell.handle(None, Msg::Key(ch('p')));
+        tx.send("late".to_owned()).await.unwrap();
+        // The batch reaches the shell's inbox before the screen goes.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        shell.handle(None, Msg::Key(ch('x')));
+        while let Ok((id, msg)) = shell.inbox.try_recv() {
+            shell.handle(Some(id), msg);
+        }
+
+        assert!(
+            !entries(&log).iter().any(|entry| entry.contains("lines")),
+            "{:?}",
+            entries(&log)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fast_stream_is_read_one_batch_at_a_time() {
+        let log = log();
+        let (shell, tx) = shell_with_a_stream(&log, 64);
+        let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        tokio::spawn({
+            let sent = Arc::clone(&sent);
+            async move {
+                for i in 0..10_000 {
+                    if tx.send(format!("line {i}")).await.is_err() {
+                        return;
+                    }
+                    sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        });
+
+        // The shell is alive but hands nothing to its screen.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let taken = sent.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            taken <= STREAM_BATCH + 64 + 1,
+            "{taken} lines were taken from a stream nobody was reading"
+        );
+        assert!(taken >= 64, "the first batch was read: {taken}");
+        drop(shell);
+    }
+
+    #[tokio::test]
+    async fn the_next_batch_is_read_once_the_screen_has_the_previous_one() {
+        let log = log();
+        let (mut shell, tx) = shell_with_a_stream(&log, 4);
+        tokio::spawn(async move {
+            for i in 0..12 {
+                if tx.send(format!("{i}")).await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        let mut seen = Vec::new();
+        while seen.len() < 12 {
+            pump_in_time(&mut shell).await;
+            seen = entries(&log)
+                .iter()
+                .filter_map(|entry| entry.strip_prefix("root:lines:4:"))
+                .flat_map(|batch| batch.split('|').map(str::to_owned).collect::<Vec<_>>())
+                .collect();
+        }
+
+        let expected: Vec<String> = (0..12).map(|i| i.to_string()).collect();
+        assert_eq!(seen, expected, "every line arrives once and in order");
+    }
+
+    #[tokio::test]
+    async fn results_that_are_already_waiting_are_delivered_before_the_next_draw() {
+        let log = log();
+        let draws = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let shell = Shell::new(
+            ctx(),
+            Box::new(Probe::new("root", &log).count_draws(&draws)),
+        );
+        let root_id = shell.stack[0].id;
+        for number in 0..10 {
+            shell
+                .results
+                .send((
+                    root_id,
+                    Msg::Loaded(number, Loaded::Suggestions(Vec::new())),
+                ))
+                .unwrap();
+        }
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let events = stream::pending().take_until(tokio::time::sleep(Duration::from_millis(100)));
+
+        shell.run_with(&mut term, Box::pin(events)).await.unwrap();
+
+        assert_eq!(
+            entries(&log).len(),
+            11,
+            "all ten results were delivered: {:?}",
+            entries(&log)
+        );
+        let drawn = draws.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(drawn <= 3, "ten waiting results cost {drawn} draws");
     }
 }

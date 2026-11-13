@@ -464,7 +464,9 @@ impl Screen for S3Browse {
             | Msg::Progress(_)
             | Msg::Warning(_)
             | Msg::Confirm(_)
-            | Msg::RunDone(_) => Vec::new(),
+            | Msg::RunDone(_)
+            | Msg::Lines(..)
+            | Msg::StreamEnded(..) => Vec::new(),
         }
     }
 

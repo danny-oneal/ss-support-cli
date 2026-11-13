@@ -171,7 +171,9 @@ impl Screen for OpsResult {
             | Msg::Warning(_)
             | Msg::Confirm(_)
             | Msg::RunDone(_)
-            | Msg::Loaded(..) => return Vec::new(),
+            | Msg::Loaded(..)
+            | Msg::Lines(..)
+            | Msg::StreamEnded(..) => return Vec::new(),
         };
         if let Some(prompt) = &mut self.saving {
             return match prompt.handle(key) {
