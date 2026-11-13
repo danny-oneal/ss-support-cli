@@ -8,6 +8,7 @@ pub mod components;
 pub mod screen;
 pub mod shell;
 pub mod theme;
+pub mod widgets;
 
 #[cfg(test)]
 pub(crate) mod testing;
