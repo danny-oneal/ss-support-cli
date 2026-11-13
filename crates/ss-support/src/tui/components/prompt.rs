@@ -51,6 +51,11 @@ impl Prompt {
         }
     }
 
+    /// Adds pasted text to the answer. A paste never submits.
+    pub fn paste(&mut self, text: &str) {
+        self.input.paste(text);
+    }
+
     /// Draws the prompt on the first row of `area`.
     pub fn render(&self, frame: &mut Frame, area: Rect) {
         let label_width = u16::try_from(self.label.width()).unwrap_or(u16::MAX);
@@ -124,5 +129,19 @@ mod tests {
 
         render_with(3, 1, |frame| prompt.render(frame, frame.area()));
         render_with(3, 1, |frame| prompt.render(frame, Rect::new(0, 1, 3, 0)));
+    }
+
+    #[test]
+    fn a_pasted_answer_is_text_and_does_not_submit() {
+        let mut prompt = Prompt::new("preset name");
+
+        prompt.paste("nightly\n");
+
+        let text = render_with(30, 1, |frame| prompt.render(frame, frame.area()));
+        assert_eq!(text, "preset name: nightly\n");
+        assert_eq!(
+            prompt.handle(key(KeyCode::Enter)),
+            PromptEvent::Submit("nightly".to_owned())
+        );
     }
 }

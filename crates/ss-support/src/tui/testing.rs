@@ -137,6 +137,7 @@ pub(crate) fn ctx() -> Ctx {
         flags: RunFlags::default(),
         export_dir: PathBuf::from("/nonexistent/ss-support-tests"),
         now: fixed_now,
+        settle: std::time::Duration::ZERO,
     }
 }
 
@@ -214,6 +215,7 @@ impl Screen for Probe {
                 other => format!("key:{other:?}"),
             },
             Msg::Resize => "resize".to_owned(),
+            Msg::Paste(text) => format!("paste:{text}"),
             Msg::Progress(p) => format!("progress:{}", p.step),
             Msg::Warning(w) => format!("warning:{w}"),
             Msg::Confirm(c) => format!("confirm:{}", c.spec.op_id),

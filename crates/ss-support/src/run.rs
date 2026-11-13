@@ -169,8 +169,9 @@ pub async fn run(cli: Cli, services: Services) -> Exit {
         tokio::spawn(async move {
             signals.next().await;
             // Exiting here skips every destructor, so a terminal the TUI
-            // took over is put back first.
-            crate::tui::restore_terminal();
+            // took over is put back first, and kept from being drawn on
+            // again until the process is gone.
+            let _silenced = crate::tui::restore_terminal_for_exit();
             std::process::exit(Exit::Interrupted.code());
         });
     };

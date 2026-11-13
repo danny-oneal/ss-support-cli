@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -23,21 +24,24 @@ use tokio_util::sync::CancellationToken;
 use crate::cli::GlobalFlags;
 use crate::run::App;
 
-/// The global flags that change how an operation runs.
+/// How long keys are dropped after a question or a result appears. A key
+/// typed, repeated, or pasted before the operator could have read the screen
+/// must not answer it.
+pub const SETTLE: Duration = Duration::from_millis(250);
+
+/// The global flags that change how an operation runs from the TUI.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RunFlags {
     /// Stop before the first mutating step.
     pub dry_run: bool,
-    /// Auto-confirm mutating operations; never destructive ones.
-    pub yes: bool,
 }
 
 impl RunFlags {
-    /// The run flags given on the command line.
+    /// The run flags given on the command line. `--yes` is not among them:
+    /// an operator who is present is always asked.
     pub fn of(global: &GlobalFlags) -> RunFlags {
         RunFlags {
             dry_run: global.dry_run,
-            yes: global.yes,
         }
     }
 }
@@ -65,6 +69,9 @@ pub struct Ctx {
     pub export_dir: PathBuf,
     /// The clock used to stamp exported reports.
     pub now: fn() -> DateTime<Utc>,
+    /// How long keys are dropped when a screen asks with
+    /// [`Cmd::IgnoreKeys`].
+    pub settle: Duration,
 }
 
 impl Ctx {
@@ -82,6 +89,7 @@ impl Ctx {
             flags,
             export_dir: PathBuf::from("."),
             now: Utc::now,
+            settle: SETTLE,
         }
     }
 }
@@ -149,6 +157,9 @@ pub enum Loaded {
 pub enum Msg {
     /// A key was pressed.
     Key(KeyEvent),
+    /// Text was pasted. It is only ever text for the focused input: its
+    /// line breaks never act as enter and its letters never act as keys.
+    Paste(String),
     /// The terminal was resized.
     Resize,
     /// A step of the screen's run changed state.
@@ -177,6 +188,10 @@ pub enum Cmd {
     Quit,
     /// Show this text in the status line.
     Status(String),
+    /// Drop keys and pastes for [`Ctx::settle`] from now. A screen asks
+    /// when it has just put something new in front of the operator that a
+    /// key already on its way must not answer. Ctrl-C is never dropped.
+    IgnoreKeys,
     /// Run this load in the background and deliver its result as
     /// [`Msg::Loaded`] with the same number.
     Task(u64, BoxFuture<Loaded>),

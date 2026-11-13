@@ -3,8 +3,10 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::time::Duration;
 
 use anyhow::Context;
+use futures_util::future::join_all;
 use futures_util::{Stream, StreamExt};
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -12,6 +14,8 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::screen::{Cmd, Ctx, Msg, Screen, ScreenId};
@@ -20,6 +24,10 @@ use super::{bridge, theme};
 /// The smallest terminal the screens are drawn on.
 const MIN_WIDTH: u16 = 20;
 const MIN_HEIGHT: u16 = 6;
+
+/// How long leaving the TUI waits for runs still in flight to stop and
+/// write their audit entries.
+pub const RUN_GRACE: Duration = Duration::from_secs(5);
 
 /// Why the event loop ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +62,11 @@ pub struct Shell {
     status: String,
     results: mpsc::UnboundedSender<(ScreenId, Msg)>,
     inbox: mpsc::UnboundedReceiver<(ScreenId, Msg)>,
+    /// Keys and pastes are dropped until this moment.
+    keys_ignored_until: Option<Instant>,
+    /// Every run started and not yet seen to finish, so that leaving can
+    /// wait for them.
+    runs: Vec<JoinHandle<()>>,
 }
 
 impl Shell {
@@ -67,6 +80,8 @@ impl Shell {
             status: String::new(),
             results,
             inbox,
+            keys_ignored_until: None,
+            runs: Vec::new(),
         };
         let (id, cmds) = shell.place(root);
         // A root screen that asks to quit while starting still gets drawn
@@ -86,8 +101,17 @@ impl Shell {
         let Some(index) = index else {
             return true;
         };
+        let typed = target.is_none() && matches!(msg, Msg::Key(_) | Msg::Paste(_));
         let interrupt = matches!(&msg, Msg::Key(key) if target.is_none() && is_ctrl_c(key));
-        if target.is_none() && matches!(msg, Msg::Key(_)) {
+        // Ctrl-C can only cancel, decline, or leave, so it is always let
+        // through.
+        let ignoring = self
+            .keys_ignored_until
+            .is_some_and(|until| Instant::now() < until);
+        if typed && ignoring && !interrupt {
+            return true;
+        }
+        if typed {
             self.status.clear();
         }
         if interrupt && index == 0 {
@@ -144,7 +168,9 @@ impl Shell {
     }
 
     /// Runs until the operator quits, the event stream ends, or the
-    /// invocation is cancelled.
+    /// invocation is cancelled. Whichever way it ends, every run still in
+    /// flight is cancelled and given [`RUN_GRACE`] to stop and write its
+    /// audit entry before this returns.
     ///
     /// # Errors
     ///
@@ -159,30 +185,56 @@ impl Shell {
         B::Error: std::error::Error + Send + Sync + 'static,
         S: Stream<Item = io::Result<Event>> + Unpin,
     {
+        let stop = self.event_loop(term, &mut events).await;
+        self.finish_runs().await;
+        stop
+    }
+
+    async fn event_loop<B, S>(
+        &mut self,
+        term: &mut Terminal<B>,
+        events: &mut S,
+    ) -> anyhow::Result<Stop>
+    where
+        B: Backend,
+        B::Error: std::error::Error + Send + Sync + 'static,
+        S: Stream<Item = io::Result<Event>> + Unpin,
+    {
         let cancel = self.ctx.cancel.clone();
         loop {
             term.draw(|frame| self.draw(frame))
                 .context("draw the screen")?;
+            // What the operator typed comes before background results, so a
+            // key is acted on by the screen it was typed at and a busy
+            // source of results cannot hold back esc or ctrl+c.
             let keep_going = tokio::select! {
                 biased;
                 () = cancel.cancelled() => return Ok(Stop::Interrupted),
-                Some((id, msg)) = self.inbox.recv() => self.handle(Some(id), msg),
                 event = events.next() => match event {
                     None => false,
                     Some(Err(e)) => return Err(e).context("read terminal event"),
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
                         self.handle(None, Msg::Key(key))
                     }
-                    Some(Ok(Event::Resize(..))) => {
-                        self.handle(None, Msg::Resize)
-                    }
+                    Some(Ok(Event::Paste(text))) => self.handle(None, Msg::Paste(text)),
+                    Some(Ok(Event::Resize(..))) => self.handle(None, Msg::Resize),
                     Some(Ok(_)) => true,
                 },
+                Some((id, msg)) = self.inbox.recv() => self.handle(Some(id), msg),
             };
             if !keep_going {
                 return Ok(Stop::Quit);
             }
         }
+    }
+
+    /// Cancels every run and waits, up to [`RUN_GRACE`], for them to end.
+    async fn finish_runs(&mut self) {
+        // Dropping the screens cancels the runs they started.
+        self.stack.clear();
+        let runs = std::mem::take(&mut self.runs);
+        // A run that does not stop in time is left behind.
+        let _ = tokio::time::timeout(RUN_GRACE, join_all(runs)).await;
     }
 
     /// Puts `screen` on top of the stack and returns its id and what it
@@ -209,6 +261,9 @@ impl Shell {
             match cmd {
                 Cmd::Quit => return false,
                 Cmd::Status(text) => self.status = text,
+                Cmd::IgnoreKeys => {
+                    self.keys_ignored_until = Some(Instant::now() + self.ctx.settle);
+                }
                 Cmd::Push(screen) => {
                     let (id, cmds) = self.place(screen);
                     queue.extend(cmds.into_iter().map(|cmd| (id, cmd)));
@@ -239,9 +294,11 @@ impl Shell {
                     Some(entry) => {
                         entry.runs.push(request.cancel.clone());
                         let results = self.results.clone();
-                        bridge::start(&self.ctx, request, move |msg| {
+                        let run = bridge::start(&self.ctx, request, move |msg| {
                             results.send((issuer, msg)).is_ok()
                         });
+                        self.runs.retain(|earlier| !earlier.is_finished());
+                        self.runs.push(run);
                     }
                     // Nobody is left to show the run, so it never starts.
                     None => request.cancel.cancel(),
@@ -281,13 +338,14 @@ mod tests {
     use futures_util::stream;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::KeyCode;
+    use ss_core::guard::Class;
     use ss_core::ops::{Input, demo};
     use tokio::sync::Notify;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::tui::screen::{Cmd, Loaded, RunRequest};
-    use crate::tui::stub_ops::StubOp;
+    use crate::tui::stub_ops::{Behavior, StubOp};
     use crate::tui::testing::{
         Log, Probe, ch, ctrl, ctx, entries, is_char, key, render_shell, screen_text,
     };
@@ -688,5 +746,200 @@ mod tests {
             .unwrap();
 
         assert_eq!(entries(&log), ["root:init"]);
+    }
+
+    /// A probe that asks for keys to be ignored when `i` is pressed.
+    fn settler(log: &Log) -> Probe {
+        Probe::new("root", log).on_msg(|msg| {
+            if is_char(msg, 'i') {
+                vec![Cmd::IgnoreKeys]
+            } else {
+                Vec::new()
+            }
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn keys_are_dropped_for_a_moment_after_a_screen_asks() {
+        let log = log();
+        let mut ctx = ctx();
+        ctx.settle = Duration::from_millis(250);
+        let mut shell = Shell::new(ctx, Box::new(settler(&log)));
+
+        shell.handle(None, Msg::Key(ch('i')));
+        shell.handle(None, Msg::Key(ch('a')));
+        shell.handle(None, Msg::Paste("pasted".to_owned()));
+        tokio::time::advance(Duration::from_millis(249)).await;
+        shell.handle(None, Msg::Key(ch('b')));
+        tokio::time::advance(Duration::from_millis(2)).await;
+        shell.handle(None, Msg::Key(ch('c')));
+
+        assert_eq!(entries(&log), ["root:init", "root:key:i", "root:key:c"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ctrl_c_is_never_dropped() {
+        let log = log();
+        let mut ctx = ctx();
+        ctx.settle = Duration::from_millis(250);
+        let child = Probe::new("child", &log).on_init(|| vec![Cmd::IgnoreKeys]);
+        let mut shell = Shell::new(ctx, Box::new(pusher(&log, child)));
+        shell.handle(None, Msg::Key(ch('p')));
+        assert_eq!(shell.depth(), 2);
+
+        shell.handle(None, Msg::Key(ch('z')));
+        shell.handle(None, Msg::Key(ctrl('c')));
+
+        assert_eq!(shell.depth(), 1, "ctrl+c still went back");
+        assert!(!entries(&log).contains(&"child:key:z".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn background_results_are_never_dropped_while_keys_are() {
+        let log = log();
+        let mut ctx = ctx();
+        ctx.settle = Duration::from_secs(60);
+        let gate = Arc::new(Notify::new());
+        let task = gated(&gate);
+        let root = settler(&log).on_init(move || vec![Cmd::Task(5, task)]);
+        let mut shell = Shell::new(ctx, Box::new(root));
+        shell.handle(None, Msg::Key(ch('i')));
+
+        gate.notify_one();
+        shell.pump().await;
+
+        assert_eq!(entries(&log), ["root:init", "root:key:i", "root:loaded:5"]);
+    }
+
+    #[tokio::test]
+    async fn a_paste_reaches_the_top_screen_as_text() {
+        let log = log();
+        let shell = Shell::new(ctx(), Box::new(Probe::new("root", &log)));
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let events = stream::iter(vec![Ok(Event::Paste("orders\ny".to_owned()))]);
+
+        shell.run_with(&mut term, events).await.unwrap();
+
+        assert_eq!(entries(&log), ["root:init", "root:paste:orders\ny"]);
+    }
+
+    #[tokio::test]
+    async fn a_key_already_typed_is_handled_before_a_result_that_is_also_ready() {
+        let log = log();
+        let root = Probe::new("root", &log).on_msg(|msg| {
+            if is_char(msg, 'q') {
+                vec![Cmd::Quit]
+            } else {
+                Vec::new()
+            }
+        });
+        let shell = Shell::new(ctx(), Box::new(root));
+        let root_id = shell.stack[0].id;
+        shell
+            .results
+            .send((root_id, Msg::Loaded(9, Loaded::Suggestions(Vec::new()))))
+            .unwrap();
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let events = stream::iter(vec![Ok(Event::Key(ch('a')))]).chain(stream::pending());
+        let events = events.take_until(tokio::time::sleep(Duration::from_millis(200)));
+
+        shell.run_with(&mut term, Box::pin(events)).await.unwrap();
+
+        assert_eq!(
+            entries(&log),
+            ["root:init", "root:key:a", "root:loaded:9"],
+            "the key the operator typed first is not overtaken"
+        );
+    }
+
+    #[derive(Default)]
+    struct Recording(std::sync::Mutex<Vec<ss_core::audit::Entry>>);
+
+    impl ss_core::audit::Logger for Recording {
+        fn record(&self, e: &ss_core::audit::Entry) -> io::Result<()> {
+            self.0.lock().unwrap().push(e.clone());
+            Ok(())
+        }
+    }
+
+    /// A shell whose root starts a mutating run that waits until cancelled,
+    /// and the audit trail that run writes to.
+    fn shell_with_a_run_in_flight(behavior: Behavior) -> (Shell, Arc<Recording>, Ctx) {
+        let audit = Arc::new(Recording::default());
+        let mut ctx = ctx();
+        ctx.audit = Arc::clone(&audit) as Arc<dyn ss_core::audit::Logger>;
+        let request = RunRequest {
+            op: Arc::new(StubOp::new("stub.slow", Class::Mutate, behavior)),
+            input: Input::default(),
+            cancel: ctx.cancel.child_token(),
+        };
+        let log = log();
+        let root = Probe::new("root", &log)
+            .on_init(move || vec![Cmd::Run(request)])
+            .on_msg(|msg| {
+                if is_char(msg, 'q') {
+                    vec![Cmd::Quit]
+                } else {
+                    Vec::new()
+                }
+            });
+        let shell = Shell::new(ctx.clone(), Box::new(root));
+        (shell, audit, ctx)
+    }
+
+    // The run and the loop are on different threads here, as they are in
+    // the real binary; on one thread the run would always happen to finish
+    // first. Repeated so that a loop which does not wait is caught.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_interrupted_loop_returns_only_after_its_run_has_been_audited() {
+        for round in 0..25 {
+            let (shell, audit, ctx) = shell_with_a_run_in_flight(Behavior::Hang);
+            let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                ctx.cancel.cancel();
+            });
+
+            let stop = shell.run_with(&mut term, stream::pending()).await.unwrap();
+
+            assert_eq!(stop, Stop::Interrupted);
+            let entries = audit.0.lock().unwrap();
+            assert_eq!(
+                entries.len(),
+                1,
+                "round {round}: the audit entry was written"
+            );
+            assert_eq!(entries[0].op_id, "stub.slow");
+        }
+    }
+
+    #[tokio::test]
+    async fn quitting_with_a_run_in_flight_cancels_it_and_waits_for_its_audit_entry() {
+        let (shell, audit, _ctx) = shell_with_a_run_in_flight(Behavior::Hang);
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        // The run reports its first step before the key is read.
+        let events = stream::once(async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok(Event::Key(ch('q')))
+        });
+
+        let stop = shell.run_with(&mut term, Box::pin(events)).await.unwrap();
+
+        assert_eq!(stop, Stop::Quit);
+        assert_eq!(audit.0.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_run_that_ignores_cancellation_delays_the_exit_only_so_long() {
+        let (shell, audit, ctx) = shell_with_a_run_in_flight(Behavior::Stuck);
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        ctx.cancel.cancel();
+        let started = tokio::time::Instant::now();
+
+        let stop = shell.run_with(&mut term, stream::pending()).await.unwrap();
+
+        assert_eq!(stop, Stop::Interrupted);
+        assert_eq!(started.elapsed(), RUN_GRACE);
+        assert!(audit.0.lock().unwrap().is_empty(), "it never finished");
     }
 }

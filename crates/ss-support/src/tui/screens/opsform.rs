@@ -204,6 +204,23 @@ impl OpsForm {
         vec![Cmd::Status(message)]
     }
 
+    /// Puts pasted text where typing would go: the preset name being
+    /// entered, or the focused field. It is never a key, so its line breaks
+    /// run nothing.
+    fn paste(&mut self, text: &str) {
+        match &mut self.overlay {
+            Overlay::Save(prompt) => prompt.paste(text),
+            Overlay::Presets { .. } => {}
+            Overlay::None => {
+                if let Some(field) = self.fields.get_mut(self.focus) {
+                    field.input.paste(text);
+                    self.error = None;
+                    self.suggestions.selected = None;
+                }
+            }
+        }
+    }
+
     fn on_key(&mut self, key: KeyEvent, ctx: &Ctx) -> Vec<Cmd> {
         match &mut self.overlay {
             Overlay::Save(prompt) => match prompt.handle(key) {
@@ -274,7 +291,10 @@ impl OpsForm {
                     field.input.set(&value);
                     self.error = None;
                 }
-                self.suggestions.selected = None;
+                // What was chosen may itself lead further, as a prefix
+                // leads to the keys under it, so the list is asked for
+                // again.
+                return self.fetch(ctx);
             }
             _ => {
                 if let Some(field) = self.fields.get_mut(self.focus)
@@ -424,6 +444,10 @@ impl Screen for OpsForm {
     fn update(&mut self, msg: Msg, ctx: &Ctx) -> Vec<Cmd> {
         match msg {
             Msg::Key(key) => self.on_key(key, ctx),
+            Msg::Paste(text) => {
+                self.paste(&text);
+                Vec::new()
+            }
             Msg::Loaded(request, loaded) if request == self.suggestions.request => match loaded {
                 Loaded::Suggestions(choices) => {
                     self.suggestions.choices = choices;
@@ -560,20 +584,32 @@ impl Screen for ProgressScreen {
         match msg {
             Msg::Progress(progress) => self.steps.apply(progress),
             Msg::Warning(warning) => return vec![Cmd::Status(format!("warning: {warning}"))],
-            Msg::Confirm(request) => self.modal = Some(ConfirmModal::new(request)),
+            // A question or an ending changes what the next key means, so
+            // keys already on their way are dropped: they were typed at
+            // the screen as it was.
+            Msg::Confirm(request) => {
+                self.modal = Some(ConfirmModal::new(request));
+                return vec![Cmd::IgnoreKeys];
+            }
             Msg::RunDone(result) => {
                 self.modal = None;
                 let RunResult { outcome, input } = *result;
                 match outcome {
                     Ok(result) => {
-                        return vec![Cmd::Replace(Box::new(OpsResult::new(
-                            Arc::clone(&self.op),
-                            input,
-                            result,
-                            ctx,
-                        )))];
+                        return vec![
+                            Cmd::IgnoreKeys,
+                            Cmd::Replace(Box::new(OpsResult::new(
+                                Arc::clone(&self.op),
+                                input,
+                                result,
+                                ctx,
+                            ))),
+                        ];
                     }
-                    Err(failure) => self.finish(failure),
+                    Err(failure) => {
+                        self.finish(failure);
+                        return vec![Cmd::IgnoreKeys];
+                    }
                 }
             }
             Msg::Key(key) => {
@@ -589,7 +625,7 @@ impl Screen for ProgressScreen {
                     self.cancel.cancel();
                 }
             }
-            Msg::Resize | Msg::Loaded(..) => {}
+            Msg::Resize | Msg::Paste(_) | Msg::Loaded(..) => {}
         }
         Vec::new()
     }
@@ -1282,11 +1318,12 @@ mod tests {
     async fn a_warning_from_the_run_is_shown_in_the_status_line() {
         let mut ctx = ctx();
         ctx.audit = Arc::new(Unwritable);
-        ctx.flags.yes = true;
         let (op, _done) = write_op(Class::Mutate);
         let mut shell = shell_with(ctx, op, "x");
 
         press(&mut shell, &[enter()]);
+        settle(&mut shell, "Proceed with stub.op?").await;
+        press(&mut shell, &[ch('y'), enter()]);
         let shown = settle(&mut shell, "view 1/1").await;
 
         assert!(shown.contains("warning: audit log: disk full"), "{shown}");
@@ -1311,5 +1348,163 @@ mod tests {
         send(&mut form, &ctx, &[ctrl('s')]);
         render_screen(&form, 1, 1);
         render_screen(&form, 0, 0);
+    }
+
+    #[test]
+    fn a_paste_fills_the_focused_field_and_never_runs() {
+        let ctx = ctx();
+        let mut form = OpsForm::new(plain(Behavior::Echo, Class::Read), &ctx);
+
+        let cmds = form.update(Msg::Paste("orders-dev\ny\n".to_owned()), &ctx);
+
+        assert!(cmds.is_empty(), "the pasted line breaks are not enter");
+        assert!(render_screen(&form, 60, 10).contains("> Target *  orders-devy"));
+    }
+
+    #[test]
+    fn a_paste_names_a_preset_without_saving_it() {
+        let (_dir, ctx) = with_presets();
+        let mut form = OpsForm::new(echo(&Asked::default()), &ctx);
+        send(&mut form, &ctx, &typed("config-dev"));
+        send(&mut form, &ctx, &[ctrl('s')]);
+
+        let cmds = form.update(Msg::Paste("nightly\n".to_owned()), &ctx);
+
+        assert!(cmds.is_empty());
+        assert!(render_screen(&form, 60, 12).contains("preset name: nightly"));
+        assert!(ctx.presets.get("stub.op", "nightly").unwrap().is_none());
+    }
+
+    fn confirm_request(class: Class) -> (Msg, tokio::sync::oneshot::Receiver<bool>) {
+        let (request, answer) =
+            crate::tui::screen::ConfirmRequest::new(ss_core::ops::ConfirmSpec {
+                op_id: "stub.op".to_owned(),
+                class,
+                resource: "orders-dev".to_owned(),
+                step: "apply".to_owned(),
+                preview: Vec::new(),
+            });
+        (Msg::Confirm(request), answer)
+    }
+
+    #[test]
+    fn a_question_that_opens_asks_for_keys_to_be_ignored() {
+        let ctx = ctx();
+        let (op, _done) = write_op(Class::Mutate);
+        let mut progress = ProgressScreen::new(op, Input::default());
+        let (question, _answer) = confirm_request(Class::Mutate);
+
+        let cmds = progress.update(question, &ctx);
+
+        assert!(matches!(cmds.as_slice(), [Cmd::IgnoreKeys]));
+    }
+
+    #[test]
+    fn a_run_that_ends_asks_for_keys_to_be_ignored_before_it_shows_how() {
+        let ctx = ctx();
+        let (op, _done) = write_op(Class::Mutate);
+        let done = |outcome| {
+            Msg::RunDone(Box::new(RunResult {
+                outcome,
+                input: Input::default(),
+            }))
+        };
+
+        let mut succeeded = ProgressScreen::new(Arc::clone(&op), Input::default());
+        let cmds = succeeded.update(done(Ok(ss_core::ops::OpResult::default())), &ctx);
+        assert!(matches!(
+            cmds.as_slice(),
+            [Cmd::IgnoreKeys, Cmd::Replace(_)]
+        ));
+
+        let mut failed = ProgressScreen::new(op, Input::default());
+        let failure = RunFailure {
+            kind: FailureKind::Failed,
+            error: anyhow::anyhow!("boom"),
+            views: Vec::new(),
+        };
+        let cmds = failed.update(done(Err(failure)), &ctx);
+        assert!(matches!(cmds.as_slice(), [Cmd::IgnoreKeys]));
+    }
+
+    #[test]
+    fn a_paste_cannot_answer_the_question() {
+        let ctx = ctx();
+        let (op, _done) = write_op(Class::Destructive);
+        let mut progress = ProgressScreen::new(op, Input::default());
+        let (question, mut answer) = confirm_request(Class::Destructive);
+        progress.update(question, &ctx);
+
+        progress.update(Msg::Paste("orders-dev\n".to_owned()), &ctx);
+        progress.update(Msg::Key(enter()), &ctx);
+
+        assert_eq!(
+            answer.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty),
+            "the name has to be typed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_typed_before_the_question_could_be_read_is_not_taken() {
+        let mut ctx = ctx();
+        ctx.settle = std::time::Duration::from_millis(250);
+        let (op, done) = write_op(Class::Mutate);
+        let mut shell = shell_with(ctx, op, "x");
+        press(&mut shell, &[enter()]);
+        settle(&mut shell, "Proceed with stub.op?").await;
+
+        press(&mut shell, &[ch('y'), enter()]);
+        tokio::task::yield_now().await;
+        assert!(
+            !done.load(Ordering::SeqCst),
+            "typed too early to be an answer"
+        );
+        assert!(render_shell(&shell, 80, 24).contains("Proceed with stub.op?"));
+
+        tokio::time::advance(std::time::Duration::from_millis(251)).await;
+        press(&mut shell, &[ch('y'), enter()]);
+        settle(&mut shell, "view 1/1").await;
+
+        assert!(done.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn choosing_a_prefix_suggestion_asks_again_for_what_is_under_it() {
+        let asked = Asked::default();
+        let under: SuggestFn = {
+            let asked = Arc::clone(&asked);
+            Arc::new(move |_deps, input| {
+                let typed = input.str("key").to_owned();
+                asked.lock().unwrap().push(input);
+                Box::pin(async move {
+                    Ok(if typed.is_empty() {
+                        vec![choice("app/")]
+                    } else {
+                        vec![choice("app/orders.json"), choice("app/users.json")]
+                    })
+                })
+            })
+        };
+        let op = stub(
+            Behavior::Echo,
+            Class::Read,
+            vec![Param::new("key").label("Key").suggest(under)],
+        );
+        let mut shell = shell_with(ctx(), op, "");
+        settle(&mut shell, "app/").await;
+
+        press(&mut shell, &[key(KeyCode::Down), enter()]);
+        let shown = settle(&mut shell, "app/users.json").await;
+
+        assert!(shown.contains("> Key    app/"), "{shown}");
+        assert_eq!(
+            asked
+                .lock()
+                .unwrap()
+                .last()
+                .map(|i| i.str("key").to_owned()),
+            Some("app/".to_owned())
+        );
     }
 }

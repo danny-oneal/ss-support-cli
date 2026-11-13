@@ -154,8 +154,24 @@ impl Screen for OpsResult {
     }
 
     fn update(&mut self, msg: Msg, ctx: &Ctx) -> Vec<Cmd> {
-        let Msg::Key(key) = msg else {
-            return Vec::new();
+        let key = match msg {
+            Msg::Key(key) => key,
+            Msg::Paste(text) => {
+                // Pasted text is only ever text: for the name being typed,
+                // or for an open diff filter.
+                if let Some(prompt) = &mut self.saving {
+                    prompt.paste(&text);
+                } else if let Some(Pane::Diff(viewer)) = self.panes.get_mut(self.current) {
+                    viewer.paste(&text);
+                }
+                return Vec::new();
+            }
+            Msg::Resize
+            | Msg::Progress(_)
+            | Msg::Warning(_)
+            | Msg::Confirm(_)
+            | Msg::RunDone(_)
+            | Msg::Loaded(..) => return Vec::new(),
         };
         if let Some(prompt) = &mut self.saving {
             return match prompt.handle(key) {
@@ -441,7 +457,7 @@ mod tests {
              \x20           Size\n\
              ----------  ----\n\
              rders.json  12 K\n\
-             \x20本.json      3\n"
+             \x20本.json    3 Ki\n"
         );
 
         press(&mut screen, &ctx, &[key(KeyCode::Left); 20]);
@@ -602,5 +618,43 @@ mod tests {
             render_screen(&screen, 1, 1);
             press(&mut screen, &ctx, &[key(KeyCode::Tab)]);
         }
+    }
+
+    #[test]
+    fn a_paste_names_the_preset_but_does_not_save_or_export() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = ctx();
+        ctx.export_dir = dir.path().to_path_buf();
+        ctx.presets = preset::Store::new(dir.path().join("presets.yaml"));
+        let mut screen = screen(vec![summary()], &ctx);
+
+        // With no prompt open, pasted letters are not keys.
+        assert!(screen.update(Msg::Paste("e\n".to_owned()), &ctx).is_empty());
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "nothing was exported"
+        );
+
+        press(&mut screen, &ctx, &[ctrl('s')]);
+        assert!(
+            screen
+                .update(Msg::Paste("nightly\n".to_owned()), &ctx)
+                .is_empty()
+        );
+
+        assert!(render_screen(&screen, 40, 4).contains("preset name: nightly"));
+        assert!(ctx.presets.get("stub.echo", "nightly").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_paste_filters_an_open_diff_filter() {
+        let ctx = ctx();
+        let mut screen = screen(vec![diff_view()], &ctx);
+        press(&mut screen, &ctx, &[ch('c'), ch('/')]);
+
+        screen.update(Msg::Paste("lim".to_owned()), &ctx);
+
+        assert!(render_screen(&screen, 50, 4).contains("/ lim"));
     }
 }

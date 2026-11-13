@@ -105,6 +105,15 @@ impl DiffViewer {
         true
     }
 
+    /// Adds pasted text to the path filter while it is open; otherwise the
+    /// paste is dropped.
+    pub fn paste(&mut self, text: &str) {
+        if self.filtering {
+            self.filter.paste(text);
+            self.selected = 0;
+        }
+    }
+
     /// Draws the diff into `area`, keeping the selected change in view.
     pub fn render(&self, frame: &mut Frame, area: Rect) {
         let shown = self.shown();
@@ -573,5 +582,22 @@ mod tests {
             let _ = mode;
             viewer.handle(ch('s'));
         }
+    }
+
+    #[test]
+    fn a_paste_goes_into_the_filter_only_while_it_is_open() {
+        let mut viewer = viewer();
+        viewer.paste("limit\n");
+        assert!(
+            !drawn(&viewer, 60, 6).contains("shown"),
+            "no filter is open"
+        );
+
+        press(&mut viewer, &[ch('c'), ch('/')]);
+        viewer.paste("limit\n");
+
+        let text = drawn(&viewer, 60, 6);
+        assert!(text.contains("/ limit"), "{text}");
+        assert!(text.contains("2 of 5 shown"), "{text}");
     }
 }

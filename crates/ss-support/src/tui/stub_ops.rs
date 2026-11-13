@@ -34,6 +34,9 @@ pub(crate) enum Behavior {
     Fail(&'static str),
     /// A read step named `wait` runs until the run is cancelled.
     Hang,
+    /// Waits forever outside any step, so cancelling the run does not end
+    /// it.
+    Stuck,
     /// Panics.
     Panic,
 }
@@ -174,6 +177,7 @@ impl Operation for StubOp {
                 .await?;
                 Ok(OpResult::default())
             }
+            Behavior::Stuck => std::future::pending().await,
             Behavior::Panic => panic!("stub operation panicked"),
         }
     }

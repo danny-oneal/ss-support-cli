@@ -188,6 +188,18 @@ impl Tui {
         }
     }
 
+    /// Waits until keys are taken again after a question or a result has
+    /// appeared.
+    async fn settle(&self) {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    fn paste(&self, text: &str) {
+        self.events
+            .send(Ok(Event::Paste(text.to_owned())))
+            .expect("the TUI is running");
+    }
+
     /// Opens the form of the operation `id` from the picker.
     async fn open(&self, id: &str) {
         self.wait_for("Operations").await;
@@ -321,6 +333,7 @@ async fn picker_to_form_to_result_shows_the_greeting() {
     tui.type_text("operator");
     tui.key(KeyCode::Enter);
     let shown = tui.wait_for("view 1/").await;
+    tui.settle().await;
 
     assert!(shown.contains("operator"), "{shown}");
     tui.key(KeyCode::Esc);
@@ -355,6 +368,7 @@ async fn a_destructive_operation_waits_for_the_typed_name_then_runs() {
     tui.type_text("x");
     tui.key(KeyCode::Enter);
     let shown = tui.wait_for("This is DESTRUCTIVE").await;
+    tui.settle().await;
     assert!(shown.contains("Will change : orders-dev"), "{shown}");
 
     tui.type_text("orders");
@@ -371,10 +385,10 @@ async fn a_destructive_operation_waits_for_the_typed_name_then_runs() {
 }
 
 #[tokio::test]
-async fn yes_does_not_skip_the_question_for_a_destructive_operation() {
+async fn yes_is_ignored_and_a_mutating_run_still_asks() {
     let root = home();
     allow_dev(root.path());
-    let (services, done) = with_write(root.path(), Class::Destructive);
+    let (services, done) = with_write(root.path(), Class::Mutate);
     let tui = Tui::start(services, &["--yes"]);
 
     tui.open("stub.write").await;
@@ -382,8 +396,47 @@ async fn yes_does_not_skip_the_question_for_a_destructive_operation() {
     tui.type_text("x");
     tui.key(KeyCode::Enter);
 
-    tui.wait_for("This is DESTRUCTIVE").await;
+    tui.wait_for("Proceed with stub.write?").await;
+    tui.settle().await;
     assert!(!done.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn keys_typed_ahead_of_the_question_do_not_answer_it() {
+    let root = home();
+    allow_dev(root.path());
+    let (services, done) = with_write(root.path(), Class::Mutate);
+    let tui = Tui::start(services, &[]);
+    tui.open("stub.write").await;
+    tui.wait_for("Target").await;
+
+    // Everything at once, as a paste without paste marks or fast typing
+    // would deliver it: the value, enter to run, then "y" and enter.
+    tui.type_text("orders");
+    tui.key(KeyCode::Enter);
+    tui.key(KeyCode::Char('y'));
+    tui.key(KeyCode::Enter);
+
+    let shown = tui.wait_for("Proceed with stub.write?").await;
+    tui.settle().await;
+    assert!(!done.load(Ordering::SeqCst), "{shown}");
+    assert!(tui.screen.text().contains("Proceed with stub.write?"));
+}
+
+#[tokio::test]
+async fn a_pasted_line_fills_the_field_and_runs_nothing() {
+    let root = home();
+    let tui = Tui::start(Services::isolated(root.path()), &[]);
+    tui.open("demo.hello").await;
+    tui.wait_for("Who to greet").await;
+
+    tui.paste("operator\n");
+    let shown = tui.wait_for("operator").await;
+
+    assert!(shown.contains("Hello (demo)"), "still on the form: {shown}");
+    assert!(!shown.contains("running"), "{shown}");
+    tui.key(KeyCode::Enter);
+    tui.wait_for("Hello, operator!").await;
 }
 
 #[tokio::test]
@@ -398,9 +451,11 @@ async fn declining_the_confirmation_returns_to_the_form_with_the_decline_shown()
     tui.type_text("orders");
     tui.key(KeyCode::Enter);
     tui.wait_for("Proceed with stub.write?").await;
+    tui.settle().await;
     tui.key(KeyCode::Char('n'));
     tui.key(KeyCode::Enter);
     let shown = tui.wait_for("Change a table — declined").await;
+    tui.settle().await;
     assert!(shown.contains("operation not confirmed"), "{shown}");
 
     tui.key(KeyCode::Esc);
@@ -461,6 +516,7 @@ async fn a_run_from_the_tui_appends_one_audit_entry() {
     tui.type_text("orders");
     tui.key(KeyCode::Enter);
     tui.wait_for("Proceed with stub.write?").await;
+    tui.settle().await;
     tui.key(KeyCode::Char('y'));
     tui.key(KeyCode::Enter);
     tui.wait_for("view 1/1").await;
@@ -490,6 +546,7 @@ async fn ctrl_c_during_a_run_cancels_it_and_the_shell_keeps_running() {
     tui.wait_for("→ wait").await;
     tui.ctrl('c');
     tui.wait_for("Wait forever — cancelled").await;
+    tui.settle().await;
 
     // Back to the form, back to the picker, then out.
     tui.key(KeyCode::Esc);
@@ -540,6 +597,7 @@ async fn the_browser_marks_two_versions_and_diffs_them() {
     tui.wait_for("Compare object versions").await;
     tui.key(KeyCode::Enter);
     tui.wait_for("view 1/2").await;
+    tui.settle().await;
     tui.key(KeyCode::Tab);
     let shown = tui.wait_for("view 2/2").await;
 

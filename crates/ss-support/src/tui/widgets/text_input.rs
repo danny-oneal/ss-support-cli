@@ -69,6 +69,15 @@ impl TextInput {
         true
     }
 
+    /// Inserts pasted text at the cursor as one line: line breaks and other
+    /// control characters are left out.
+    pub fn paste(&mut self, text: &str) {
+        for c in text.chars().filter(|c| !c.is_control()) {
+            self.value.insert(self.cursor, c);
+            self.cursor += c.len_utf8();
+        }
+    }
+
     /// How many terminal columns the text before the cursor occupies.
     #[cfg(test)]
     pub(crate) fn cursor_col(&self) -> u16 {
@@ -360,5 +369,15 @@ mod tests {
             input.render(frame, Rect::new(0, 0, 0, 1), true);
             input.render(frame, Rect::new(0, 0, 4, 0), true);
         });
+    }
+
+    #[test]
+    fn pasted_text_is_inserted_at_the_cursor_without_line_breaks_or_controls() {
+        let mut input = field("ab", &[key(KeyCode::Left)]);
+
+        input.paste("x\r\ny\x1b[2J\tz");
+
+        assert_eq!(input.value(), "axy[2Jzb");
+        assert_eq!(input.cursor_col(), 7);
     }
 }

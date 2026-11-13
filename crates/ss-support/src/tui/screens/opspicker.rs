@@ -89,7 +89,9 @@ impl OpsPicker {
                 self.filter.set("");
                 self.selected = 0;
             }
-            KeyCode::Esc => return vec![Cmd::Quit],
+            // Esc means "back" everywhere else; here there is nowhere to go
+            // back to, and it must not end the program.
+            KeyCode::Esc => {}
             _ if self.filtering => {
                 if self.filter.handle(key) {
                     self.selected = 0;
@@ -187,6 +189,15 @@ impl Screen for OpsPicker {
     fn update(&mut self, msg: Msg, ctx: &Ctx) -> Vec<Cmd> {
         match msg {
             Msg::Key(key) => self.on_key(key, ctx),
+            Msg::Paste(text) => {
+                // Text for an open filter, and nothing otherwise: pasted
+                // letters are never commands.
+                if self.filtering {
+                    self.filter.paste(&text);
+                    self.selected = 0;
+                }
+                Vec::new()
+            }
             Msg::Resize
             | Msg::Progress(_)
             | Msg::Warning(_)
@@ -328,7 +339,7 @@ mod tests {
         assert!(render_screen(&picker, 100, 30).contains("demo.hello"));
 
         let cmds = send(&mut picker, &[key(KeyCode::Esc)]);
-        assert!(matches!(cmds.as_slice(), [Cmd::Quit]));
+        assert!(cmds.is_empty(), "esc never ends the program");
     }
 
     #[test]
@@ -451,5 +462,27 @@ mod tests {
         render_screen(&picker, 0, 0);
         send(&mut picker, &[ch('/')]);
         render_screen(&picker, 1, 1);
+    }
+
+    #[test]
+    fn a_paste_is_filter_text_and_never_a_command() {
+        let ctx = ctx();
+        let mut picker = picker();
+
+        let cmds = picker.update(Msg::Paste("qb\n".to_owned()), &ctx);
+        assert!(cmds.is_empty(), "pasted q, b, and enter do nothing");
+
+        send(&mut picker, &[ch('/')]);
+        let cmds = picker.update(Msg::Paste("vdiff\n".to_owned()), &ctx);
+
+        assert!(cmds.is_empty(), "the pasted line break opens nothing");
+        assert_eq!(selected(&picker), "s3.version-diff");
+    }
+
+    #[test]
+    fn esc_without_a_filter_does_nothing() {
+        let mut picker = picker();
+
+        assert!(send(&mut picker, &[key(KeyCode::Esc)]).is_empty());
     }
 }

@@ -24,7 +24,7 @@ use futures_util::Stream;
 use ratatui::Terminal;
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::crossterm::cursor::{Hide, Show};
-use ratatui::crossterm::event::{Event, EventStream};
+use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, Event, EventStream};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -104,12 +104,14 @@ impl Entered {
 
 static ENTERED: Entered = Entered::new();
 
+/// Bracketed paste is turned on so that pasted text arrives marked as a
+/// paste and can be kept from acting as keys.
 fn enter_sequences(out: &mut impl Write) -> io::Result<()> {
-    execute!(out, EnterAlternateScreen, Hide)
+    execute!(out, EnterAlternateScreen, Hide, EnableBracketedPaste)
 }
 
 fn leave_sequences(out: &mut impl Write) -> io::Result<()> {
-    execute!(out, Show, LeaveAlternateScreen)
+    execute!(out, DisableBracketedPaste, Show, LeaveAlternateScreen)
 }
 
 /// Holds the terminal in raw mode on the alternate screen and puts it back
@@ -143,18 +145,31 @@ impl Drop for TermGuard {
 /// exit path, any number of times; it does nothing when the TUI never took
 /// the terminal over.
 pub fn restore_terminal() {
-    restore();
+    drop(restore_and_silence());
 }
 
-/// Puts the terminal back if the TUI holds it, and says whether it did.
-fn restore() -> bool {
-    let held = ENTERED.take();
-    if held {
-        // Nothing useful can be done when the terminal itself is failing.
-        let _ = leave_sequences(&mut io::stdout());
-        let _ = disable_raw_mode();
+/// [`restore_terminal`] for a path that is about to end the process while
+/// other threads are still running. When the TUI held the terminal, the
+/// returned lock on stdout must be kept until the process exits: it stops
+/// the thread that draws from writing another frame onto the terminal that
+/// has just been put back. Without the TUI nothing is locked.
+#[must_use = "dropping the lock lets another thread draw on the restored terminal"]
+pub fn restore_terminal_for_exit() -> Option<io::StdoutLock<'static>> {
+    restore_and_silence()
+}
+
+/// Puts the terminal back if the TUI holds it, and returns the lock on
+/// stdout it was put back under.
+fn restore_and_silence() -> Option<io::StdoutLock<'static>> {
+    if !ENTERED.take() {
+        return None;
     }
-    held
+    let mut out = io::stdout().lock();
+    // Nothing useful can be done when the terminal itself is failing.
+    let _ = leave_sequences(&mut out);
+    let _ = out.flush();
+    let _ = disable_raw_mode();
+    Some(out)
 }
 
 /// The exit status of a process ended by a panic.
@@ -167,9 +182,11 @@ const PANIC_EXIT: i32 = 101;
 pub(crate) fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let held = restore();
+        // Held until the process ends, so no frame follows the restore or
+        // lands in the middle of the panic message.
+        let silenced = restore_terminal_for_exit();
         previous(info);
-        if held {
+        if silenced.is_some() {
             std::process::exit(PANIC_EXIT);
         }
     }));
@@ -203,7 +220,10 @@ mod tests {
 
         enter_sequences(&mut out).unwrap();
 
-        assert_eq!(String::from_utf8(out).unwrap(), "\x1b[?1049h\x1b[?25l");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b[?1049h\x1b[?25l\x1b[?2004h"
+        );
     }
 
     #[test]
@@ -212,6 +232,9 @@ mod tests {
 
         leave_sequences(&mut out).unwrap();
 
-        assert_eq!(String::from_utf8(out).unwrap(), "\x1b[?25h\x1b[?1049l");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b[?2004l\x1b[?25h\x1b[?1049l"
+        );
     }
 }

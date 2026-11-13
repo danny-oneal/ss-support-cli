@@ -12,7 +12,7 @@ use ratatui::widgets::Paragraph;
 use ss_core::ops::s3::{human_size, short_id, timestamp};
 use ss_core::ops::{BoxFuture, Input};
 use ss_core::svc::SvcError;
-use ss_core::svc::s3::{Bucket, ObjectMeta, S3Port, Version};
+use ss_core::svc::s3::{Bucket, ObjectMeta, S3Port, Version, is_current};
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui::components::errorpanel::render_error;
@@ -301,6 +301,18 @@ impl S3Browse {
         let [newer, older] = marked.as_slice() else {
             return status(HOW_TO_DIFF);
         };
+        // An object written before versioning was turned on has the id
+        // `null`, which also means "the current version". Passing it for
+        // anything but the latest entry would compare the wrong version.
+        if let Some(unaddressable) = [newer, older]
+            .into_iter()
+            .find(|version| is_current(&version.id) && !version.is_latest)
+        {
+            return status(&format!(
+                "the version with id {:?} can only be compared from the command line",
+                unaddressable.id
+            ));
+        }
         let Some(op) = ctx.registry.get(VERSION_DIFF) else {
             return status(&format!("{VERSION_DIFF} is not available"));
         };
@@ -448,6 +460,7 @@ impl Screen for S3Browse {
             Msg::Loaded(request, loaded) if request == self.request => self.arrived(loaded),
             Msg::Loaded(..)
             | Msg::Resize
+            | Msg::Paste(_)
             | Msg::Progress(_)
             | Msg::Warning(_)
             | Msg::Confirm(_)
@@ -1011,5 +1024,63 @@ mod tests {
 
         render_screen(&screen, 1, 1);
         render_screen(&screen, 0, 0);
+    }
+
+    #[tokio::test]
+    async fn a_version_without_an_id_cannot_be_compared_unless_it_is_the_latest() {
+        // An object written before versioning was turned on keeps the id
+        // "null", which the port reads as "the current version".
+        let fake = FakeS3::new();
+        fake.create_bucket("logs-dev");
+        fake.insert(
+            "config-dev",
+            "app/orders.json",
+            "null",
+            r#"{"limit":1}"#,
+            at(1),
+        );
+        fake.insert(
+            "config-dev",
+            "app/orders.json",
+            "v2",
+            r#"{"limit":2}"#,
+            at(2),
+        );
+        fake.insert("config-dev", "app/users.json", "u1", "{}", at(1));
+        fake.insert("config-dev", "readme.txt", "r1", "hi", at(1));
+        let mut shell = browser(ctx_with(fake));
+        settle(&mut shell, "logs-dev").await;
+        press(&mut shell, &[enter()]);
+        settle(&mut shell, "readme.txt").await;
+        press(&mut shell, &[enter()]);
+        settle(&mut shell, "users.json").await;
+        press(&mut shell, &[enter()]);
+        settle(&mut shell, "v2").await;
+
+        press(&mut shell, &[ch(' '), down(), ch(' '), ch('d')]);
+
+        let shown = render_shell(&shell, 80, 24);
+        assert_eq!(shell.depth(), 1, "no form was opened: {shown}");
+        assert!(
+            shown.contains(
+                "the version with id \"null\" can only be compared from the command line"
+            ),
+            "{shown}"
+        );
+    }
+
+    #[tokio::test]
+    async fn marks_survive_a_reload_while_their_versions_still_exist() {
+        let mut shell = on_versions(ctx_with(seeded())).await;
+        press(&mut shell, &[ch(' '), down(), ch(' ')]);
+
+        press(&mut shell, &[ch('r')]);
+        shell.pump().await;
+
+        let shown = render_shell(&shell, 80, 24);
+        assert!(
+            shown.contains("[x] v3") && shown.contains("[x] v2"),
+            "{shown}"
+        );
     }
 }

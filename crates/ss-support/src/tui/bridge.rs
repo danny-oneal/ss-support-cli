@@ -1,19 +1,25 @@
-//! Runs an operation off the UI: the same runner, guard, confirmation rule,
-//! and audit trail as a headless run, with progress and the confirmation
-//! question delivered as messages.
+//! Runs an operation off the UI: the same runner, guard, and audit trail as
+//! a headless run, with progress and the confirmation question delivered as
+//! messages. Every mutating run asks; nothing auto-confirms here.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use ss_core::ops::{ConfirmSpec, Confirmer, FailureKind, RunFailure, Runner};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::screen::{ConfirmRequest, Ctx, Msg, RunRequest, RunResult};
 
 /// Starts `req` on a background task. `send` delivers the run's progress,
 /// warnings, and confirmation question, then exactly one [`Msg::RunDone`];
-/// it returns false once nobody is listening, which cancels the run.
-pub fn start(ctx: &Ctx, req: RunRequest, send: impl Fn(Msg) -> bool + Send + Sync + 'static) {
+/// it returns false once nobody is listening, which cancels the run. The
+/// returned handle finishes once the run has ended and been audited.
+pub fn start(
+    ctx: &Ctx,
+    req: RunRequest,
+    send: impl Fn(Msg) -> bool + Send + Sync + 'static,
+) -> JoinHandle<()> {
     let RunRequest { op, input, cancel } = req;
     let outbox = Outbox {
         send: Arc::new(send),
@@ -23,7 +29,6 @@ pub fn start(ctx: &Ctx, req: RunRequest, send: impl Fn(Msg) -> bool + Send + Syn
         .guard(Arc::clone(&ctx.guard))
         .audit(Arc::clone(&ctx.audit))
         .dry_run(ctx.flags.dry_run)
-        .yes(ctx.flags.yes)
         .user(ctx.user.clone())
         .cancel(cancel)
         .progress({
@@ -51,7 +56,7 @@ pub fn start(ctx: &Ctx, req: RunRequest, send: impl Fn(Msg) -> bool + Send + Syn
             outcome,
             input: started_with,
         })));
-    });
+    })
 }
 
 /// Where a run's messages go, and the token that stops the run once they
@@ -157,7 +162,7 @@ mod tests {
                         assert!(extra.is_none(), "a message followed the result");
                         return (events, *result);
                     }
-                    Msg::Key(_) | Msg::Resize | Msg::Loaded(..) => {
+                    Msg::Key(_) | Msg::Paste(_) | Msg::Resize | Msg::Loaded(..) => {
                         panic!("a run never reports input or load messages")
                     }
                 }
@@ -393,31 +398,6 @@ mod tests {
             text.contains("dry-run: stopped before the first mutating step"),
             "{text}"
         );
-        assert!(!done.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn yes_skips_the_question_for_a_mutating_operation() {
-        let mut ctx = ctx();
-        ctx.flags.yes = true;
-        let (op, done) = StubOp::write("stub.write", Class::Mutate, "orders-dev");
-
-        let (events, _result) = begin(&ctx, op).finish(Answer::No).await;
-
-        assert_eq!(events, ["apply:Running", "apply:Done"]);
-        assert!(done.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn yes_never_skips_the_question_for_a_destructive_operation() {
-        let mut ctx = ctx();
-        ctx.flags.yes = true;
-        let (op, done) = StubOp::write("stub.drop", Class::Destructive, "orders-dev");
-
-        let (events, result) = begin(&ctx, op).finish(Answer::No).await;
-
-        assert_eq!(events, ["confirm:apply", "apply:Skipped"]);
-        assert_eq!(kind(&result), FailureKind::Declined);
         assert!(!done.load(Ordering::SeqCst));
     }
 
