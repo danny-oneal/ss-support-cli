@@ -497,7 +497,7 @@ async fn a_dry_run_changes_nothing_and_says_so() {
     tui.wait_for("Change a table (dry run)").await;
     tui.type_text("x");
     tui.key(KeyCode::Enter);
-    let shown = tui.wait_for("view 1/1").await;
+    let shown = tui.wait_for("view 1/2").await;
 
     assert!(
         shown.contains("dry-run: stopped before the first mutating step"),

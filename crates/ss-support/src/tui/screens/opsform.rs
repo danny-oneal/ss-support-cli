@@ -1300,14 +1300,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dry_run_ends_on_a_result_that_says_nothing_changed() {
+    async fn a_dry_run_ends_on_a_result_that_says_it_stopped_and_holds_the_preview() {
         let mut ctx = ctx();
         ctx.flags.dry_run = true;
         let (op, done) = write_op(Class::Mutate);
         let mut shell = shell_with(ctx, op, "x");
 
         press(&mut shell, &[enter()]);
-        let shown = settle(&mut shell, "view 1/1").await;
+        // The note that the run stopped, then what it was about to change.
+        let shown = settle(&mut shell, "view 1/2").await;
 
         assert!(
             shown.contains("dry-run: stopped before the first mutating step"),

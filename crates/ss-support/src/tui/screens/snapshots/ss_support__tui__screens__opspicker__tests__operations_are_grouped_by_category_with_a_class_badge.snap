@@ -15,6 +15,7 @@ DynamoDB
 S3
   s3.object-inspect    Inspect object           read         Metadata, version history, and body pre
   s3.prefix-audit      Audit prefix             read         Object count, size, age spread, and lar
+  s3.restore-version   Restore object version   mutate       Make an earlier version of an S3 object
   s3.version-diff      Compare object versions  read         Semantic diff between two versions of o
 Zeta
   zz.drop-table        Drop a table             destructive  removes a table and its items

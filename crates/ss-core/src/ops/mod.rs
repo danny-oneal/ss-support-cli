@@ -57,6 +57,9 @@ pub fn builtin() -> Registry {
         .register(Arc::new(s3::PrefixAudit))
         .expect("builtin operation ids are unique");
     registry
+        .register(Arc::new(s3::RestoreVersion))
+        .expect("builtin operation ids are unique");
+    registry
         .register(Arc::new(s3::VersionDiff))
         .expect("builtin operation ids are unique");
     registry
@@ -81,6 +84,7 @@ mod tests {
                 "ddb.item-history",
                 "s3.object-inspect",
                 "s3.prefix-audit",
+                "s3.restore-version",
                 "s3.version-diff"
             ]
         );
