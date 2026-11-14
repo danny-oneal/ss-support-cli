@@ -1,6 +1,7 @@
-//! Guards that keep the DynamoDB operations read-only: every one is
-//! classified as a read, and each runs to completion where no environment
-//! allows writes and no confirmation can be answered.
+//! Guards that keep the DynamoDB operations read-only, all but the one that
+//! edits an item: every other one is classified as a read, and each runs to
+//! completion where no environment allows writes and no confirmation can be
+//! answered.
 
 use std::fs;
 use std::sync::Arc;
@@ -32,12 +33,17 @@ fn seeded() -> FakeDdb {
 }
 
 #[test]
-fn every_ddb_operation_is_a_read() {
+fn every_ddb_operation_but_the_edit_is_a_read() {
     let mut ids = Vec::new();
     for op in ops::builtin().all() {
         let meta = op.meta();
         if meta.id.starts_with("ddb.") {
-            assert_eq!(meta.class, Class::Read, "{} is not a read", meta.id);
+            let expected = if meta.id == "ddb.item-edit" {
+                Class::Destructive
+            } else {
+                Class::Read
+            };
+            assert_eq!(meta.class, expected, "{}", meta.id);
             ids.push(meta.id);
         }
     }
@@ -47,6 +53,7 @@ fn every_ddb_operation_is_a_read() {
         [
             "ddb.gsi-consistency",
             "ddb.item-compare",
+            "ddb.item-edit",
             "ddb.item-history"
         ]
     );

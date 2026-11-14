@@ -15,10 +15,12 @@ use crate::svc::ddb::{AttrType, DdbPort, Item, Key, TableInfo};
 pub(crate) mod fixture;
 mod gsi_consistency;
 mod item_compare;
+mod item_edit;
 mod item_history;
 
 pub use gsi_consistency::GsiConsistency;
 pub use item_compare::ItemCompare;
+pub use item_edit::ItemEdit;
 pub use item_history::ItemHistory;
 
 /// The DynamoDB port of `deps`, or an error when the invocation has none.

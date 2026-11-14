@@ -89,8 +89,9 @@ impl Operation for RestoreVersion {
             Some(existing) => existing.version_label(),
             None => "a delete marker (the object is deleted now)".to_owned(),
         };
+        // Paths the diff defaults ignore are written all the same, so the
+        // preview hides nothing.
         let opts = Opts {
-            ignore: r.deps.diff.ignore.clone(),
             array_match: r.deps.diff.array_match.clone(),
             ..Opts::default()
         };
@@ -206,50 +207,16 @@ fn replaced_by_restoring<'a>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use super::*;
+    use crate::ops::asked::Asked;
     use crate::ops::s3::fixture;
-    use crate::ops::{ConfirmSpec, Confirmer, FailureKind, RunFailure, find_cause};
+    use crate::ops::{FailureKind, RunFailure, find_cause};
     use crate::svc::SvcError;
     use crate::svc::s3::{FakeS3, S3Port};
 
     const KEY: &str = "tenants/acme.json";
-
-    /// Answers every confirmation the same way and keeps what it was shown.
-    struct Asked {
-        answer: bool,
-        seen: Mutex<Vec<ConfirmSpec>>,
-        /// Runs while the operator is deciding.
-        meanwhile: Box<dyn Fn() + Send + Sync>,
-    }
-
-    impl Asked {
-        fn answering(answer: bool) -> Arc<Asked> {
-            Asked::after(answer, || {})
-        }
-
-        fn after(answer: bool, meanwhile: impl Fn() + Send + Sync + 'static) -> Arc<Asked> {
-            Arc::new(Asked {
-                answer,
-                seen: Mutex::new(Vec::new()),
-                meanwhile: Box::new(meanwhile),
-            })
-        }
-
-        fn times(&self) -> usize {
-            self.seen.lock().unwrap().len()
-        }
-    }
-
-    #[async_trait]
-    impl Confirmer for Asked {
-        async fn confirm(&self, spec: ConfirmSpec) -> anyhow::Result<bool> {
-            (self.meanwhile)();
-            self.seen.lock().unwrap().push(spec);
-            Ok(self.answer)
-        }
-    }
 
     fn input(key: &str, version: &str) -> Input {
         [
@@ -354,8 +321,12 @@ mod tests {
             (left.as_str(), right.as_str()),
             ("v2 (2026-07-02 10:00)", "v1 (2026-07-01 10:00)")
         );
-        // From platinum back to gold, and the added rule goes again.
-        assert_eq!((delta.stats.removed, delta.stats.changed), (1, 1));
+        // From platinum back to gold, the added rule goes again, and the
+        // timestamp changes: a path the diff defaults ignore is still part
+        // of what is written, so it is shown.
+        assert_eq!((delta.stats.removed, delta.stats.changed), (1, 2));
+        let paths: Vec<_> = delta.changes.iter().map(|c| c.path.dotted()).collect();
+        assert!(paths.contains(&"updatedAt".to_owned()), "{paths:?}");
     }
 
     #[tokio::test]
