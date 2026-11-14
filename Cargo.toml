@@ -4,7 +4,7 @@ members = ["crates/ss-core", "crates/ss-support"]
 
 # One version for both crates, released together.
 [workspace.package]
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -20,7 +20,11 @@ aws-sdk-sts = "1.97"
 base64 = "0.21"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 clap = { version = "4", features = ["derive"] }
+# Used through `ratatui::crossterm`; listed only to enable the async event stream.
+crossterm = { version = "0.29", features = ["event-stream"] }
+futures-util = "0.3"
 globset = "0.4"
+ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 # No `preserve_order`: sorted keys are what makes jsonutil::canonical canonical.
 serde_dynamo = { version = "4", features = ["aws-sdk-dynamodb+1"] }
@@ -32,6 +36,8 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "process", "io-util", "signal", "time", "fs"] }
 tokio-util = "0.7"
 tracing = "0.1"
+unicode-segmentation = "1"
+unicode-width = "0.2"
 # dev
 insta = "1"
 

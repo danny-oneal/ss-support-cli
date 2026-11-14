@@ -6,6 +6,40 @@
 > `superpowers:subagent-driven-development` or `superpowers:executing-plans`.
 > Phases 0 and 1 are specified at task granularity here so work can start today.
 
+## Status and re-sequencing (2026-11-12)
+
+This plan is superseded for everything that has not landed by
+`docs/2026-11-12-finish-roadmap.md`. The sections below are kept as the record of the
+original design; where they disagree with the roadmap, the roadmap wins.
+
+| Phase | Status at 0.1.0-alpha.4 | Remaining work now lives in |
+|---|---|---|
+| 0, 1, 2 | Landed | — |
+| 3, 4 | Landed read-only (S3, DynamoDB, kubectl; no write methods on any port) | Roadmap M3 (port writes) |
+| 5 | 8 of 10 real operations landed | Roadmap M3 (`s3.restore-version`, `ddb.item-edit`) |
+| 6 | Not started; **moved ahead of the rest of Phase 5** | Roadmap M1 (`docs/2026-11-12-tui-core.md`) and M2 (pods, logs) |
+| 7 | Reduced to minimal distribution | Roadmap M4 |
+
+What changed, and who decided it:
+- **The TUI comes early** (user, 2026-11-12): it is built next, before the write
+  operations. The new order is TUI core → pods and logs screens → write operations →
+  distribution.
+- **Go parity is dropped** (user, 2026-11-12): the repository is standalone and holds no
+  Go source or binary, so the differential harness, the `go-freeze`/`go-final` tags, and
+  the Go retirement steps of Phases 5 and 7 are removed. §4a remains as a record of known
+  behavior differences, not as input to a normalizer.
+- **Kubernetes is read-only** (project rule): the rollout-restart and scale operations of
+  Phase 5 and the `rollout_restart`/`scale` methods of the Phase 3 `KubectlPort` sketch are
+  out for good. The project ends at ten real operations, not twelve.
+- **Distribution is minimal** (user, 2026-11-12): static completions, version stamping, a
+  configuration reference, and `cargo install` instructions. The release workflow,
+  cross-compiled binaries, and install script of Phase 7 are removed.
+- **Phase 6 key map**: the README never gained a "TUI keys" section, so the key list in
+  the Phase 6 section below is the source, and the TUI plan adds the README table. The
+  picker's `p` key arrives with the pods screen in M2.
+- Already done outside their phase: the workspace sits at the repository root, and the
+  diff golden fixtures are vendored under `crates/ss-core/tests/fixtures/diff/`.
+
 **Goal:** Reimplement the `ss` support-operations CLI in Rust with feature-for-feature
 parity against the Go implementation (P0–P6: 16 operations, headless CLI, TUI, guard,
 audit, presets, cache, diff engine), shipping a single static binary.

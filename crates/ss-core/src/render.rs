@@ -3,6 +3,7 @@
 use std::fmt::Write as _;
 
 use serde_json::{Map, Value, json};
+use unicode_width::UnicodeWidthStr;
 
 use crate::diff::{Change, Delta, Kind};
 use crate::jsonutil;
@@ -53,14 +54,17 @@ fn write_title(out: &mut String, title: &str) {
 }
 
 fn write_summary(out: &mut String, fields: &[(String, String)]) {
-    let width = fields
-        .iter()
-        .map(|(key, _)| key.chars().count())
-        .max()
-        .unwrap_or(0);
+    let width = fields.iter().map(|(key, _)| key.width()).max().unwrap_or(0);
     for (key, value) in fields {
-        let _ = writeln!(out, "{key:<width$} : {value}");
+        let _ = writeln!(out, "{} : {value}", padded(key, width));
     }
+}
+
+/// `text` followed by the spaces that bring it to `width` terminal columns.
+/// Columns are counted as a terminal shows them, so wide characters line up.
+fn padded(text: &str, width: usize) -> String {
+    let pad = width.saturating_sub(text.width());
+    format!("{text}{}", " ".repeat(pad))
 }
 
 fn write_diff(out: &mut String, left: &str, right: &str, delta: &Delta) {
@@ -91,10 +95,10 @@ fn write_change(out: &mut String, change: &Change) {
 }
 
 fn write_table(out: &mut String, cols: &[String], rows: &[Vec<String>]) {
-    let mut widths: Vec<usize> = cols.iter().map(|c| c.chars().count()).collect();
+    let mut widths: Vec<usize> = cols.iter().map(|c| c.width()).collect();
     for row in rows {
         for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.chars().count());
+            *width = (*width).max(cell.width());
         }
     }
     write_row(out, &widths, cols);
@@ -112,7 +116,7 @@ fn write_row(out: &mut String, widths: &[usize], cells: &[String]) {
             line.push_str("  ");
         }
         let cell = cells.get(i).map_or("", String::as_str);
-        let _ = write!(line, "{cell:<width$}");
+        line.push_str(&padded(cell, *width));
     }
     out.push_str(line.trim_end());
     out.push('\n');
@@ -297,5 +301,32 @@ root
             rows: vec![vec!["héllo".into(), "1".into()]],
         };
         assert_eq!(text(&[v]), "Name   N\n-----  -\nhéllo  1\n");
+    }
+
+    #[test]
+    fn table_columns_line_up_when_cells_hold_wide_characters() {
+        let view = View::Table {
+            title: String::new(),
+            cols: vec!["Key".into(), "Size".into()],
+            rows: vec![
+                vec!["config/orders.json".into(), "12 KiB".into()],
+                vec!["config/日本.json".into(), "3 KiB".into()],
+            ],
+        };
+
+        assert_eq!(
+            text(&[view]),
+            "Key                 Size\n\
+             ------------------  ------\n\
+             config/orders.json  12 KiB\n\
+             config/日本.json    3 KiB\n"
+        );
+    }
+
+    #[test]
+    fn summary_values_line_up_when_keys_hold_wide_characters() {
+        let view = View::summary([("名前", "orders"), ("Size", "3"), ("id", "7")]);
+
+        assert_eq!(text(&[view]), "名前 : orders\nSize : 3\nid   : 7\n");
     }
 }

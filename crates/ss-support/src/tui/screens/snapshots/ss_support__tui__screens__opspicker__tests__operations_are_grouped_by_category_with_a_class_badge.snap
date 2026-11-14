@@ -1,0 +1,20 @@
+---
+source: crates/ss-support/src/tui/screens/opspicker.rs
+expression: "render_screen(&OpsPicker::new(&registry), 100, 24)"
+---
+Cross-service
+> config.drift         Config drift check       read         Diff an S3 config object against a live
+  record.trace         Trace record to config   read         Follow a domain record to its S3 config
+Demo
+  demo.hello           Hello (demo)             read         Fake operation exercising the full pipe
+  demo.json-diff       Diff two JSON files      read         Semantic diff of two local JSON documen
+DynamoDB
+  ddb.gsi-consistency  GSI consistency check    read         Diff an item against its projection in
+  ddb.item-compare     Compare items            read         Semantic diff between two DynamoDB item
+  ddb.item-history     Item history             read         List an item's versions (V0 = latest) a
+S3
+  s3.object-inspect    Inspect object           read         Metadata, version history, and body pre
+  s3.prefix-audit      Audit prefix             read         Object count, size, age spread, and lar
+  s3.version-diff      Compare object versions  read         Semantic diff between two versions of o
+Zeta
+  zz.drop-table        Drop a table             destructive  removes a table and its items

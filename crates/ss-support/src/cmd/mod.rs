@@ -7,12 +7,16 @@ use ss_core::ops::{Registry, View};
 use crate::cli::{Cli, Command};
 use crate::io::Io;
 use crate::run::{App, Failure};
+use crate::tui::{self, RunFlags};
 
 mod ops;
 mod presets;
 mod run_op;
 
-/// Runs the chosen subcommand; with none, prints the help.
+pub(crate) use run_op::elapsed_text;
+
+/// Runs the chosen subcommand. With none, an operator at a terminal gets the
+/// interactive front-end, and anything else (a pipe, a script) gets the help.
 pub(crate) async fn dispatch(
     cli: &Cli,
     registry: &Registry,
@@ -20,6 +24,7 @@ pub(crate) async fn dispatch(
     io: &Io,
 ) -> Result<(), Failure> {
     match &cli.command {
+        None if io.is_terminal => tui::launch(registry, app, RunFlags::of(&cli.global)).await,
         None => print(io, &crate::cli::command(registry).render_help().to_string()),
         Some(Command::Ops(cmd)) => ops::run(cmd, registry, io),
         Some(Command::Presets(cmd)) => presets::run(cmd, &app.presets, io),

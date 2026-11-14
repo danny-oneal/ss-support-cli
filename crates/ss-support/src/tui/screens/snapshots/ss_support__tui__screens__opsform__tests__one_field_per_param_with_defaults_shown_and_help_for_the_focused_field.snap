@@ -1,0 +1,9 @@
+---
+source: crates/ss-support/src/tui/screens/opsform.rs
+expression: "render_screen(&form, 60, 10)"
+---
+> Bucket *
+  Key
+  Max       default: 100
+
+Bucket to read

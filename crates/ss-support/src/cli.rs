@@ -10,8 +10,8 @@ use ss_core::vars::{self, Vars};
 
 pub mod dynamic;
 
-/// Command-line surface. With no subcommand the interactive TUI is the
-/// default; until it exists, a bare invocation prints help.
+/// Command-line surface. With no subcommand, an operator at a terminal gets
+/// the interactive front-end; anywhere else a bare invocation prints help.
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "ss-support",

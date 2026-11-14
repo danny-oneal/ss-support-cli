@@ -104,7 +104,7 @@ pub(crate) fn suggest_versions() -> SuggestFn {
 }
 
 /// `id`, cut to its first twelve characters and marked with `…` when longer.
-pub(crate) fn short_id(id: &str) -> String {
+pub fn short_id(id: &str) -> String {
     match id.char_indices().nth(12) {
         Some((cut, _)) => format!("{}…", &id[..cut]),
         None => id.to_owned(),
@@ -112,7 +112,7 @@ pub(crate) fn short_id(id: &str) -> String {
 }
 
 /// `n` bytes in binary units: `512 B`, `1.5 KiB`, `5.0 GiB`.
-pub(crate) fn human_size(n: u64) -> String {
+pub fn human_size(n: u64) -> String {
     const UNITS: [char; 6] = ['K', 'M', 'G', 'T', 'P', 'E'];
     if n < 1024 {
         return format!("{n} B");
@@ -142,7 +142,7 @@ pub(crate) fn age(then: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
 }
 
 /// `t` rendered with the chrono format `fmt`, or `-` when unknown.
-pub(crate) fn timestamp(t: Option<DateTime<Utc>>, fmt: &str) -> String {
+pub fn timestamp(t: Option<DateTime<Utc>>, fmt: &str) -> String {
     t.map_or_else(|| "-".to_owned(), |t| t.format(fmt).to_string())
 }
 

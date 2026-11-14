@@ -1,0 +1,14 @@
+---
+source: crates/ss-support/src/tui/components/diffviewer.rs
+expression: "drawn(&viewer, 72, 10)"
+---
+diff V1 → current   (+1 −2 ~1 !1)
+  change                     │V1                  │current
+> + added                    │                    │"x"
+  - legacy                   │true                │
+  ~ limit                    │100                 │250
+  ! rules[0].limit           │1                   │"1"
+  - tags[1]                  │"b"                 │
+                             │                    │
+                             │                    │
+                             │                    │

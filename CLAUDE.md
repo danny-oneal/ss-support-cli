@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 *ALWAYS* Ask clarifying questions during the planning stage. Never make assumptions or decisions on your own during the planning phase. Always declare a decision, and again if it changes, during the planning sessions.
 
-`ss-support` is a support-operations CLI for non-production AWS and Kubernetes resources, written in Rust (edition 2024, MSRV 1.88). It is a port of an earlier Go implementation; only demo operations exist so far.
+`ss-support` is a support-operations CLI for non-production AWS and Kubernetes resources, written in Rust (edition 2024, MSRV 1.88). It is a port of an earlier Go implementation. It has two front-ends over the same operations: the `ss-support run` command line and an interactive TUI (a bare `ss-support` on a terminal).
 
 ## Commands
 
@@ -60,8 +60,21 @@ Library code never reads `std::env` directly — it reads a `Vars` snapshot (`ss
 
 Semantic JSON diff with typed paths, structural ignore globs, keyed and LCS array alignment, float tolerance, null-as-absent, and a line-diff fallback. JSON numbers are normalized to f64 and formatted like the original implementation (exponent outside 1e-6..1e21) — preserve this. `serde_json` is deliberately built *without* `preserve_order`: sorted keys are what make `jsonutil::canonical` canonical. Golden cases live in `crates/ss-core/tests/fixtures/diff/<case>/{a.json,b.json,expected.txt}`.
 
+### TUI (`ss-support/src/tui/`)
+
+ratatui + crossterm. `shell.rs` owns a stack of `Screen`s (`screen.rs`: `title`, `hints`, `init`, `update`, `view`, `interrupt`) and one event loop over terminal events, background results, and the invocation's cancel token.
+
+- **`update` never calls a remote service.** A screen returns `Cmd`s (`Push`/`Pop`/`Replace`/`Quit`/`Status`/`IgnoreKeys`/`Task`/`Run`); the shell spawns the work and routes the result back to the screen that asked, by `ScreenId`, or drops it if that screen has gone. A screen ignores a `Msg::Loaded` whose request number is not its latest.
+- **Runs go through `bridge.rs`**, which builds the same `Runner` as `cmd/run_op.rs` (guard, audit, `--dry-run`) but never passes `--yes`: the TUI always asks. Progress and the confirmation question arrive as `Msg`s. Popping the screen that started a run cancels it, and `Shell::run_with` cancels and awaits every run (up to `RUN_GRACE`) before it returns, so an audit entry is not lost on exit.
+- **Input that was already on its way must not answer something new.** The confirmation is a typed answer plus enter (`components/confirm.rs`); a screen returns `Cmd::IgnoreKeys` when it shows a question or a result, which drops keys and pastes for `Ctx::settle`; the loop handles terminal events before background results; and a paste arrives as `Msg::Paste`, which is only ever text for a focused input. Keep all four when adding a screen that can change state.
+- **Ctrl-C** is intercepted by the shell: quit on the bottom screen, `Screen::interrupt` elsewhere (default: go back; the run screen cancels or declines). It is never dropped by `IgnoreKeys`.
+- **Terminal restore**: `tui::restore_terminal()` is idempotent and is called from the guard's `Drop`. Paths that end the process with other threads still running (the panic hook, the second-signal exit in `run.rs`) call `restore_terminal_for_exit()` and hold the stdout lock it returns, so no frame is drawn after the restore.
+- **Never render a bare `&str`/`String` as a widget**: ratatui does not clip it to an empty area and panics on tiny terminals. Use `Line`. Text from outside goes through `tui::text::clean` (tabs expanded, control characters dropped).
+- Whether to open the TUI is decided by `Io::is_terminal` (false for `Io::capture`), never by asking the process's stdin directly.
+
 ## Testing
 
+- `crates/ss-support/tests/tui.rs` runs the whole TUI event loop in-process through `ss_support::run_tui_with` on an in-memory terminal, sending keys and waiting for text to appear. Screen and component unit tests live beside the code and use `tui/testing.rs` (`render_screen`, `settle`, `Probe`) and `tui/stub_ops.rs`; snapshots are plain text under `snapshots/` (write with `INSTA_UPDATE=always`, then read them).
 - `crates/ss-support/tests/e2e.rs` drives `ss_support::run_with(cli, Services::isolated(tmp), Io::capture(stdin))` in-process and asserts on `(Exit, stdout, stderr)` — no subprocess/`assert_cmd`. Custom stub `Operation`s can be registered into `services.registry` for a test.
 - `crates/ss-support/tests/signals.rs` covers interrupt handling; `crates/ss-core/tests/runner.rs` covers the Runner with fakes.
 
