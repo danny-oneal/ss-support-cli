@@ -8,7 +8,7 @@ What is tested, at which layer, how to run it, and what is not tested.
 make check                                   # what CI runs: fmt --check, clippy -D warnings, every test
 make msrv                                    # type-check on the minimum supported Rust
 cargo test -p ss-core <name>                 # one library test
-cargo test -p ss-support --test e2e <name>   # one end-to-end test (also: s3, ddb, flow, writes, tui, signals, docs)
+cargo test -p ss-support --test e2e <name>   # one end-to-end test (also: s3, ddb, flow, ddb_guards, flow_guards, writes, tui, signals, docs)
 make contract                                # S3 contract suite against MinIO      (SS_SUPPORT_S3_TEST_ENDPOINT)
 make contract-ddb                            # DynamoDB contract suite against dynalite (SS_SUPPORT_DDB_TEST_ENDPOINT)
 ```
@@ -64,10 +64,9 @@ stand-in `kubectl` first on `PATH`, and checks that the stand-in is gone when
 the TUI ends. The stand-in ignores hangups, so that only the program
 stopping it can end it.
 
-**A test must be able to fail.** A test added for a defect is run against
-the code without the fix first. Where a review found a test that passed with
-the guarded code removed, the test was rewritten until removing the code
-failed it.
+**A test must be able to fail.** When adding a test for a defect, run it
+against the code without the fix first. A test that still passes with the
+code it guards removed is not a test of that code and is rewritten.
 
 ## What is not tested
 
@@ -79,9 +78,11 @@ failed it.
 - **A real cluster.** The kubectl adapter is tested against a script that
   stands in for `kubectl`. How a real `kubectl` words its failures rests on
   knowledge of it.
-- **zsh and fish completion behaviour.** The bash script is asked for
-  completions by bash itself. The zsh script is loaded by zsh but not asked;
-  the fish script is checked for content only.
+- **zsh completion behaviour.** The bash and fish scripts are asked for
+  completions by the shells themselves (CI installs zsh and fish, and a test
+  whose shell is missing fails there; elsewhere it is skipped). The zsh
+  script is loaded by zsh in a test; asking it for completions has only been
+  done by hand.
 - **Windows.** The signal and pseudo-terminal tests are Unix or Linux only.
 - **Colours and real terminals.** The TUI is tested on an in-memory terminal;
   how it looks in a particular terminal emulator is not.

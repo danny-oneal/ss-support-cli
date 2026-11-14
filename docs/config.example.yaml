@@ -1,6 +1,6 @@
 # ss-support configuration — copy to ~/.config/ss-support/config.yaml (or point SS_SUPPORT_CONFIG at it).
 #
-# SAFETY MODEL (DESIGN §8): only environments listed here are eligible for
+# SAFETY MODEL: only environments listed here are eligible for
 # Mutate/Destructive operations; anything not listed is read-only. There is
 # no override flag. When an environment sets account_id, the AWS caller
 # identity is checked against it before any S3 or DynamoDB call (skipped
@@ -22,7 +22,7 @@ environments:
     account_id: "444455556666"
     kube_context: staging-cluster
 
-# Diff engine defaults (DESIGN §6.2). Operations add their own rules and
+# Diff defaults. Operations add their own rules and
 # --ignore appends at runtime.
 diff:
   # Fields that are pure noise — every diff shows them changed otherwise.
@@ -37,9 +37,9 @@ diff:
     "$.rules[*]": id
     "$.items[*]": id
 
-# record.trace domain locators (DESIGN §5.4). Record shapes differ per
+# record.trace domain locators. Record shapes differ per
 # domain; each entry teaches ss-support how to find a record and follow it to S3.
-# The common shape (hash/version/key/versionId/storeNumber) is the default —
+# The common shape (hash/version/key/versionId) is the default —
 # only deviations need spelling out. versionId holds the literal S3 version
 # ID. Table/bucket names vary per environment: use {env} templates, or a
 # per-env override map when naming is irregular.

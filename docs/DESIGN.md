@@ -148,8 +148,9 @@ Every run goes through `Runner::execute`:
      it is stopped. A dry run stops here. Otherwise the first `mutate` of a
      run asks for confirmation, showing whatever the operation registered
      with `r.preview(…)`.
-4. Record one **audit** entry for every run that is not a read: who, where,
-   what, with which params, the outcome, and how long it took.
+4. Record one **audit** entry for every run that is not a read and got past
+   step 1: who, where, what, with which params, the outcome, and how long it
+   took.
 
 Confirmation depends on the operation's class:
 

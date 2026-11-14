@@ -36,6 +36,9 @@ that is set wins:
 | AWS region | `--region` | `SS_SUPPORT_REGION` | the environment's `region` |
 | Kubernetes context | `--context` | none | the environment's `kube_context` |
 
+When none of the three names a profile, the AWS SDK's own rules decide,
+`AWS_PROFILE` included.
+
 Two more variables point the AWS calls somewhere else, for a local stand-in:
 `SS_SUPPORT_S3_ENDPOINT` (MinIO, for example) and `SS_SUPPORT_DDB_ENDPOINT`
 (dynalite or DynamoDB Local). With either set, the account check described
@@ -59,7 +62,7 @@ environments:
 | `default_env` | string | none | The environment used when neither `--env` nor `SS_SUPPORT_ENV` names one. |
 | `environments` | map of name to environment | empty | The allowlist. Only an environment named here may run `s3.restore-version` or `ddb.item-edit`; there is no flag that overrides this. |
 | `diff` | map | empty | How comparisons are made; see below. |
-| `trace` | map | empty | Where `record.trace` and `config.drift` find records. Its one key, `domains`, holds an entry per kind of record; see below. |
+| `trace` | map | empty | Where `record.trace` finds records. Its one key, `domains`, holds an entry per kind of record; see below. |
 
 ### `environments.<name>`
 
@@ -70,7 +73,7 @@ environment on the allowlist.
 |---|---|---|---|
 | `profile` | string | the SDK's default chain | The AWS named profile. SSO and assume-role chains are resolved by the SDK. |
 | `region` | string | the profile's region | The AWS region. |
-| `account_id` | string | none | When set, the account the credentials resolve to is checked against it before any S3 or DynamoDB call, and a mismatch stops the run. Quote it, so that a leading zero survives. |
+| `account_id` | string | none | When set, the account the credentials resolve to is checked against it before any S3 or DynamoDB call, and a mismatch stops the run. It is kept as written, quoted or not. |
 | `kube_context` | string | none | The kubectl context every Kubernetes call is pinned to. Without one (and without `--context`) anything that needs Kubernetes fails and kubectl is not started; kubectl's own current context is never used. |
 
 ### `diff`
@@ -101,7 +104,7 @@ to follow the record to the S3 object it points at.
 | `s3_key_attr` | string | `key` | The attribute that holds the object's key. |
 | `s3_version_attr` | string | `versionId` | The attribute that holds the object's version id. |
 | `labels` | list of attribute names | empty | Attributes shown in summaries. |
-| `namespace` | string | none | The Kubernetes namespace `config.drift` looks in when none is given. |
+| `namespace` | string | none | The Kubernetes namespace `record.trace --configmap` looks in when `--namespace` is not given. `config.drift` does not read it. |
 
 ### A complete file
 
@@ -157,8 +160,9 @@ beside it wins), and `ctrl+s` saves from the TUI. `ss-support presets list`,
 
 The file can also be edited by hand; it is read on every use. Under the one
 top-level key `presets`, each operation id holds its presets by name, and
-each preset holds parameter names and values. Every value is a string, so
-quote numbers and anything YAML would read as something else.
+each preset holds parameter names and values. A value is kept as text
+exactly as it is written, quoted or not: `20` stays `20`, and `~` is that
+character, not an empty value.
 
 ```yaml presets
 presets:
@@ -180,9 +184,11 @@ nothing and would hide the operation's default.
 ## The audit log
 
 Every run of an operation that is not a read appends one line of JSON to the
-audit log when it ends: who ran what, in which environment, with which
-parameters, how long it took, and how it ended (`ok`, `declined`, `denied`,
-`dry-run`, or `error`). Reads are not logged. The directories are created
+audit log when it ends: who ran what (the name in `USER`, else `LOGNAME`), in
+which environment, with which parameters, how long it took, and how it ended
+(`ok`, `declined`, `denied`, `dry-run`, or `error`). Reads are not logged,
+and neither is a run stopped for a missing required parameter, which never
+starts. The directories are created
 private to the user and the file is readable by the user only. Parameters
 are recorded as given, including the values passed to `ddb.item-edit --set`.
 

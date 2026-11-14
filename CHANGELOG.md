@@ -19,6 +19,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 - `docs/DESIGN.md` and `docs/TESTING_PLAN.md` describe this program.
 
+### Security
+- The AWS SDK is built without its older HTTP client and TLS stack (hyper
+  0.14, rustls 0.21), which nothing used and which carried seven of the nine
+  advisories `cargo audit` reported. The two that remain are in
+  `crypto-bigint`, which SigV4A signing depends on.
+
 ## [0.1.0-alpha.7] - 2026-11-13
 
 ### Added

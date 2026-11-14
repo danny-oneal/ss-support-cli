@@ -969,7 +969,7 @@ async fn the_zsh_script_loads_in_zsh() {
     let out = match run {
         Ok(out) => out,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("skipping: zsh is not installed");
+            skip_without("zsh");
             return;
         }
         Err(e) => panic!("run zsh: {e}"),
@@ -1064,4 +1064,78 @@ fn version_is_one_line_that_starts_with_the_package_version() {
         text.starts_with(&format!("ss-support {}", env!("CARGO_PKG_VERSION"))),
         "{text}"
     );
+}
+
+/// Says that a test is skipped because `shell` is not installed. Where the
+/// tests run for a pull request the shell must be there, so that the test
+/// cannot be skipped unnoticed.
+#[cfg(unix)]
+fn skip_without(shell: &str) {
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "{shell} is not installed where it is required"
+    );
+    eprintln!("skipping: {shell} is not installed");
+}
+
+/// What fish offers for the command line `line`; `None` where fish is not
+/// installed.
+#[cfg(unix)]
+async fn fish_offers(root: &Path, line: &str) -> Option<Vec<String>> {
+    let script = root.join("ss-support.fish");
+    fs::write(&script, completion_script(root, "fish").await).expect("write script");
+    let run = std::process::Command::new("fish")
+        .args([
+            "--no-config",
+            "-c",
+            "source $argv[1]; and complete -C $argv[2]",
+        ])
+        .arg(&script)
+        .arg(line)
+        .env("HOME", root)
+        .output();
+    let out = match run {
+        Ok(out) => out,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            skip_without("fish");
+            return None;
+        }
+        Err(e) => panic!("run fish: {e}"),
+    };
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Each line is a completion, then a tab and its description.
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|offer| offer.split('\t').next().unwrap_or_default().to_owned())
+            .collect(),
+    )
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fish_completes_subcommands_operations_and_their_flags() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let Some(subcommands) = fish_offers(root.path(), "ss-support pre").await else {
+        return;
+    };
+
+    assert_eq!(subcommands, ["presets"]);
+    let operations = fish_offers(root.path(), "ss-support run s3.re")
+        .await
+        .expect("fish is installed");
+    assert_eq!(operations, ["s3.restore-version"]);
+    let flags = fish_offers(root.path(), "ss-support run s3.restore-version --")
+        .await
+        .expect("fish is installed");
+    for want in ["--bucket", "--key", "--version", "--dry-run"] {
+        assert!(
+            flags.iter().any(|flag| flag == want),
+            "no {want} in {flags:?}"
+        );
+    }
 }

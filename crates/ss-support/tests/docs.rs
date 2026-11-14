@@ -16,16 +16,17 @@ fn reference() -> String {
     fs::read_to_string(repo().join("docs/configuration.md")).expect("read docs/configuration.md")
 }
 
-/// The fenced blocks of `doc` opened with exactly ```` ```{tag} ````.
+/// The fenced blocks of `doc` opened with ```` ```{tag} ````, whatever
+/// surrounds the fence on its line.
 fn blocks(doc: &str, tag: &str) -> Vec<String> {
     let opening = format!("```{tag}");
     let mut found = Vec::new();
     let mut current: Option<String> = None;
     for line in doc.lines() {
         match &mut current {
-            None if line == opening => current = Some(String::new()),
+            None if line.trim() == opening => current = Some(String::new()),
             None => {}
-            Some(_) if line == "```" => found.extend(current.take()),
+            Some(_) if line.trim() == "```" => found.extend(current.take()),
             Some(block) => {
                 block.push_str(line);
                 block.push('\n');
@@ -59,6 +60,52 @@ fn every_configuration_example_is_a_file_the_program_accepts() {
             .all()
             .unwrap_or_else(|e| panic!("presets example {i} is refused: {e:#?}\n{block}"));
         assert!(!saved.is_empty(), "presets example {i} saves nothing");
+    }
+}
+
+#[test]
+fn no_yaml_example_goes_unchecked() {
+    let doc = reference();
+    let fences = doc
+        .lines()
+        .filter(|line| line.trim_start().starts_with("```yaml"))
+        .count();
+
+    assert_eq!(
+        fences,
+        blocks(&doc, "yaml config").len() + blocks(&doc, "yaml presets").len(),
+        "every YAML example is marked `yaml config` or `yaml presets`"
+    );
+}
+
+#[test]
+fn every_presets_example_names_real_operations_and_params() {
+    let doc = reference();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = ss_core::ops::builtin();
+
+    for (i, block) in blocks(&doc, "yaml presets").iter().enumerate() {
+        let path = dir.path().join(format!("presets-{i}.yaml"));
+        fs::write(&path, block).expect("write example");
+        let store = preset::Store::new(&path);
+        for (op_id, names) in store.all().expect("the example parses") {
+            let op = registry
+                .get(&op_id)
+                .unwrap_or_else(|| panic!("presets example {i}: no operation {op_id}"));
+            let declared: Vec<&str> = op.params().iter().map(|p| p.name).collect();
+            for name in names {
+                let params = store
+                    .get(&op_id, &name)
+                    .expect("the example parses")
+                    .expect("a listed preset is there");
+                for param in params.keys() {
+                    assert!(
+                        declared.contains(&param.as_str()),
+                        "presets example {i}: {op_id} has no param {param}"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -140,20 +187,21 @@ fn the_complete_example_sets_every_key() {
 }
 
 #[test]
-fn the_reference_names_every_key_and_variable() {
+fn the_reference_has_a_row_for_every_key_and_names_every_variable() {
     let doc = reference();
-    let keys = [
+    // Each of these is a key with a row of its own in one of the tables; a
+    // mention somewhere else on the page does not count.
+    let rows = [
         "default_env",
         "environments",
+        "diff",
+        "trace",
         "profile",
         "region",
         "account_id",
         "kube_context",
-        "diff",
         "ignore",
         "array_match",
-        "trace",
-        "domains",
         "table",
         "tables",
         "bucket",
@@ -166,9 +214,17 @@ fn the_reference_names_every_key_and_variable() {
         "s3_version_attr",
         "labels",
         "namespace",
-        "presets",
     ];
-    let variables = [
+    for key in rows {
+        let row = format!("| `{key}` |");
+        assert!(
+            doc.lines().any(|line| line.starts_with(&row)),
+            "the reference has no table row for `{key}`"
+        );
+    }
+    let named = [
+        "domains",
+        "presets",
         "SS_SUPPORT_CONFIG",
         "SS_SUPPORT_PRESETS",
         "SS_SUPPORT_ENV",
@@ -176,11 +232,14 @@ fn the_reference_names_every_key_and_variable() {
         "SS_SUPPORT_REGION",
         "SS_SUPPORT_S3_ENDPOINT",
         "SS_SUPPORT_DDB_ENDPOINT",
+        "AWS_PROFILE",
+        "USER",
+        "LOGNAME",
         "XDG_CONFIG_HOME",
         "XDG_STATE_HOME",
         "XDG_CACHE_HOME",
     ];
-    for name in keys.iter().chain(&variables) {
+    for name in named {
         assert!(
             doc.contains(&format!("`{name}`")),
             "the reference does not name `{name}`"

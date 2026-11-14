@@ -32,6 +32,11 @@ jobs:
       - name: Clippy (warnings as errors)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The completion scripts are loaded and asked for completions by the
+      # shells themselves; a test whose shell is missing fails here.
+      - name: Install zsh and fish
+        run: sudo apt-get update && sudo apt-get install -y zsh fish
+
       - name: Test
         run: cargo test --workspace
 
