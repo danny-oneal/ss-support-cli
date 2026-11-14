@@ -34,7 +34,9 @@ impl Confirmer for StdinConfirmer {
                 spec.op_id,
                 spec.class,
                 spec.step,
-                render::text(&spec.preview)
+                // What is shown comes from the stored data itself; none of
+                // it may drive the terminal the answer is typed at.
+                crate::tui::text::clean(&render::text(&spec.preview))
             );
         }
         if destructive {
@@ -117,6 +119,25 @@ mod tests {
         };
         let ok = confirmer.confirm(spec).await.expect("confirm");
         (ok, captured)
+    }
+
+    #[tokio::test]
+    async fn control_characters_in_what_is_shown_do_not_reach_the_terminal() {
+        let preview = vec![View::Doc {
+            title: "Line diff".to_owned(),
+            body: "-old\n+new\x1b[2J\x1b[1;1Hall good\x07\ttabbed".to_owned(),
+            lang: "diff".to_owned(),
+        }];
+
+        let (_, captured) = answer("n\n", spec(Class::Mutate, preview)).await;
+
+        let shown = captured.stderr();
+        assert!(
+            !shown.contains('\x1b') && !shown.contains('\x07'),
+            "{shown:?}"
+        );
+        assert!(shown.contains("+new[2J[1;1Hall good"), "{shown}");
+        assert!(shown.contains("-old\n"), "line breaks are kept: {shown:?}");
     }
 
     #[tokio::test]

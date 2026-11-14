@@ -10,18 +10,25 @@ use crate::guard::Class;
 use crate::ops::compare::{Comparison, compare_bodies};
 use crate::ops::{Input, Meta, OpResult, Operation, Param, Runner, View};
 use crate::svc::SvcError;
-use crate::svc::s3::{Version, is_current};
+use crate::svc::s3::{Version, Versioning, is_current};
 
 /// Restores an earlier version of one S3 object by copying it onto the key,
 /// which adds a version: the one that was current stays in the history.
 ///
 /// Before anything is asked the operation shows the difference between the
-/// current content and the version to restore. It refuses to proceed when
-/// the bucket is not keeping versions of the object, since the copy would
-/// then overwrite the current content for good, and it copies nothing when
-/// the object's current version is no longer the one that was shown.
+/// current content and the version to restore. It refuses to proceed unless
+/// the bucket has versioning enabled, since the copy could otherwise
+/// overwrite content for good, and it copies nothing when the object's
+/// current version is no longer the one that was shown.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RestoreVersion;
+
+/// Said of two versions whose bytes are the same.
+const IDENTICAL: &str = "none: the content is identical; only the version changes";
+
+/// Said of two versions that are not the same bytes although the comparison
+/// finds no change between them.
+const NOT_SHOWN: &str = "not the same bytes, but nothing this comparison shows: spacing, the order of keys, or digits beyond double precision";
 
 #[async_trait]
 impl Operation for RestoreVersion {
@@ -73,6 +80,20 @@ impl Operation for RestoreVersion {
             });
         };
 
+        // Where versioning is off the copy overwrites the object, and where
+        // it is suspended the copy takes the place of whichever version has
+        // no id, current or not.
+        let versioning = r
+            .step("check that the bucket keeps versions", |_| async {
+                Ok(s3.versioning(bucket).await?)
+            })
+            .await?;
+        if versioning != Versioning::Enabled {
+            bail!(
+                "{bucket} is not keeping versions (versioning is {versioning}), so a restore could overwrite content for good"
+            );
+        }
+
         let (restored, existing) = r
             .step("fetch the version and the current content", |_| async {
                 let restored = s3.get_version(bucket, key, version).await?;
@@ -89,31 +110,41 @@ impl Operation for RestoreVersion {
             Some(existing) => existing.version_label(),
             None => "a delete marker (the object is deleted now)".to_owned(),
         };
-        // Paths the diff defaults ignore are written all the same, so the
-        // preview hides nothing.
-        let opts = Opts {
-            array_match: r.deps.diff.array_match.clone(),
-            ..Opts::default()
-        };
+        // What the diff defaults ignore, or match out of order, is written
+        // all the same, so the preview uses none of them.
+        let opts = Opts::default();
         // From what is there now to what will be there.
         let change = existing.as_ref().map(|existing| {
+            let identical = existing.body == restored.body;
             match compare_bodies(&existing.body, &restored.body, &opts) {
-                Comparison::Json(delta) => (
-                    delta.stats.to_string(),
-                    View::Diff {
+                Comparison::Json(delta) => {
+                    let changes = if identical {
+                        IDENTICAL.to_owned()
+                    } else if delta.stats.total() == 0 {
+                        NOT_SHOWN.to_owned()
+                    } else {
+                        delta.stats.to_string()
+                    };
+                    let view = View::Diff {
                         left: replacing.clone(),
                         right: restored_label.clone(),
                         delta,
-                    },
-                ),
-                Comparison::Lines(body) => (
-                    "line diff (a body is not valid JSON)".to_owned(),
-                    View::Doc {
+                    };
+                    (changes, view)
+                }
+                Comparison::Lines(body) => {
+                    let changes = if identical {
+                        IDENTICAL
+                    } else {
+                        "line diff (a body is not valid JSON)"
+                    };
+                    let view = View::Doc {
                         title: format!("Line diff: {replacing} → {restored_label}"),
                         body,
                         lang: "diff".into(),
-                    },
-                ),
+                    };
+                    (changes.to_owned(), view)
+                }
             }
         });
         let changes = change.as_ref().map_or(
@@ -168,8 +199,7 @@ impl Operation for RestoreVersion {
 /// # Errors
 ///
 /// Fails when the history has no such version, when the version is a delete
-/// marker, when it has no id of its own to be copied by, and when the
-/// current entry has no id, which means the bucket would not keep it.
+/// marker, and when it has no id of its own to be copied by.
 fn replaced_by_restoring<'a>(
     object: &str,
     history: &'a [Version],
@@ -197,11 +227,6 @@ fn replaced_by_restoring<'a>(
     let Some(current) = history.iter().find(|v| v.is_latest) else {
         bail!("{object} has no current version");
     };
-    if is_current(&current.id) {
-        bail!(
-            "{object}: the bucket is not keeping versions of this object, so restoring would overwrite its current content for good"
-        );
-    }
     Ok(Some(current))
 }
 
@@ -214,7 +239,7 @@ mod tests {
     use crate::ops::s3::fixture;
     use crate::ops::{FailureKind, RunFailure, find_cause};
     use crate::svc::SvcError;
-    use crate::svc::s3::{FakeS3, S3Port};
+    use crate::svc::s3::{FakeS3, S3Port, Versioning};
 
     const KEY: &str = "tenants/acme.json";
 
@@ -321,12 +346,17 @@ mod tests {
             (left.as_str(), right.as_str()),
             ("v2 (2026-07-02 10:00)", "v1 (2026-07-01 10:00)")
         );
-        // From platinum back to gold, the added rule goes again, and the
-        // timestamp changes: a path the diff defaults ignore is still part
-        // of what is written, so it is shown.
-        assert_eq!((delta.stats.removed, delta.stats.changed), (1, 2));
+        // From platinum back to gold, and the timestamp changes: a path the
+        // diff defaults ignore is still part of what is written, so it is
+        // shown.
         let paths: Vec<_> = delta.changes.iter().map(|c| c.path.dotted()).collect();
-        assert!(paths.contains(&"updatedAt".to_owned()), "{paths:?}");
+        for path in ["tier", "updatedAt"] {
+            assert!(paths.contains(&path.to_owned()), "{paths:?}");
+        }
+        assert!(
+            delta.stats.removed >= 1,
+            "the added rule goes again: {paths:?}"
+        );
     }
 
     #[tokio::test]
@@ -371,21 +401,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_bucket_that_keeps_no_versions_is_refused_before_anything_is_asked() {
-        let s3 = fixture::fake();
-        // Written while versioning was off: the current version has no id.
+    async fn a_bucket_that_is_not_keeping_versions_is_refused_before_anything_is_asked() {
+        for state in [Versioning::Suspended, Versioning::Off] {
+            let s3 = fixture::fake();
+            s3.set_versioning(fixture::BUCKET, state);
+            let asked = Asked::answering(true);
+
+            let failure = restore(&s3, &asked, KEY, "v1")
+                .await
+                .expect_err("a copy could overwrite content for good");
+
+            let message = format!("{:#}", failure.error);
+            assert!(
+                message.contains("is not keeping versions") && message.contains(&state.to_string()),
+                "{message}"
+            );
+            assert_eq!(failure.kind, FailureKind::Failed);
+            assert_eq!(asked.times(), 0);
+            assert_eq!(ids(&s3, KEY).await, ["v2", "v1"]);
+        }
+    }
+
+    /// An object written before the bucket kept versions, then twice since.
+    fn with_an_older_version_without_an_id() -> FakeS3 {
+        let s3 = FakeS3::new();
+        s3.insert(fixture::BUCKET, KEY, "null", r#"{"n":0}"#, fixture::t0());
         s3.insert(
             fixture::BUCKET,
             KEY,
-            "null",
-            r#"{"tier":"silver"}"#,
-            fixture::t0() + chrono::Duration::hours(48),
+            "v1",
+            r#"{"n":1}"#,
+            fixture::t0() + chrono::Duration::hours(1),
         );
+        s3.insert(
+            fixture::BUCKET,
+            KEY,
+            "v2",
+            r#"{"n":2}"#,
+            fixture::t0() + chrono::Duration::hours(2),
+        );
+        s3
+    }
+
+    #[tokio::test]
+    async fn suspended_versioning_is_refused_though_the_current_version_has_an_id() {
+        // The copy would take the place of the version without an id.
+        let s3 = with_an_older_version_without_an_id();
+        s3.set_versioning(fixture::BUCKET, Versioning::Suspended);
         let asked = Asked::answering(true);
 
         let failure = restore(&s3, &asked, KEY, "v1")
             .await
-            .expect_err("the current content would be lost");
+            .expect_err("the version without an id would be lost");
 
         assert!(
             format!("{:#}", failure.error).contains("is not keeping versions"),
@@ -393,7 +460,19 @@ mod tests {
             failure.error
         );
         assert_eq!(asked.times(), 0);
-        assert_eq!(ids(&s3, KEY).await, ["null", "v2", "v1"]);
+        assert_eq!(ids(&s3, KEY).await, ["v2", "v1", "null"]);
+    }
+
+    #[tokio::test]
+    async fn an_older_version_without_an_id_does_not_stop_a_restore_where_versions_are_kept() {
+        let s3 = with_an_older_version_without_an_id();
+        let asked = Asked::answering(true);
+
+        restore(&s3, &asked, KEY, "v1").await.expect("restored");
+
+        let history = ids(&s3, KEY).await;
+        assert_eq!(&history[1..], ["v2", "v1", "null"], "{history:?}");
+        assert_eq!(current_body(&s3, KEY).await, r#"{"n":1}"#);
     }
 
     #[tokio::test]
@@ -566,5 +645,74 @@ mod tests {
         let cause = find_cause::<SvcError>(&failure.error).expect("a service error");
         assert!(cause.is_not_found(), "{:#}", failure.error);
         assert_eq!(asked.times(), 0);
+    }
+
+    /// One object at two versions with the given bodies.
+    fn two_bodies(older: &str, newer: &str) -> FakeS3 {
+        let s3 = FakeS3::new();
+        s3.insert(fixture::BUCKET, KEY, "v1", older, fixture::t0());
+        s3.insert(
+            fixture::BUCKET,
+            KEY,
+            "v2",
+            newer,
+            fixture::t0() + chrono::Duration::hours(1),
+        );
+        s3
+    }
+
+    /// The `Changes` line and the number of changes of the preview shown
+    /// when `v1` is restored over `v2`.
+    async fn previewed(s3: &FakeS3) -> (String, usize) {
+        let asked = Asked::answering(true);
+        restore(s3, &asked, KEY, "v1").await.expect("restored");
+        let seen = asked.seen.lock().unwrap();
+        let changes = field(&seen[0].preview[0], "Changes").to_owned();
+        let shown = match &seen[0].preview[1] {
+            View::Diff { delta, .. } => delta.stats.total(),
+            other => panic!("the second preview view is a diff: {other:?}"),
+        };
+        (changes, shown)
+    }
+
+    #[tokio::test]
+    async fn a_reordered_array_is_shown_though_the_diff_defaults_match_it_by_key() {
+        // The fixture's defaults match `rules` by `id`, under which these
+        // two bodies are the same.
+        let s3 = two_bodies(
+            r#"{"rules":[{"id":"a"},{"id":"b"}]}"#,
+            r#"{"rules":[{"id":"b"},{"id":"a"}]}"#,
+        );
+
+        let (changes, shown) = previewed(&s3).await;
+
+        assert!(shown > 0, "the reorder is written, so it is shown");
+        assert_ne!(changes, "no changes");
+    }
+
+    #[tokio::test]
+    async fn bodies_that_differ_without_a_change_to_show_are_not_called_unchanged() {
+        // Other spacing, and a number whose last digits a double cannot
+        // hold.
+        for (older, newer) in [
+            (r#"{"a":1}"#, r#"{ "a" : 1 }"#),
+            (r#"{"n":9007199254740993}"#, r#"{"n":9007199254740992}"#),
+        ] {
+            let (changes, shown) = previewed(&two_bodies(older, newer)).await;
+
+            assert_eq!(shown, 0, "{older} against {newer}");
+            assert!(
+                changes.contains("not the same bytes"),
+                "{older} against {newer}: {changes}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn restoring_identical_content_says_only_the_version_changes() {
+        let (changes, shown) = previewed(&two_bodies(r#"{"a":1}"#, r#"{"a":1}"#)).await;
+
+        assert_eq!(shown, 0);
+        assert!(changes.contains("identical"), "{changes}");
     }
 }

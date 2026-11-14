@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{Bucket, Object, ObjectMeta, Page, S3Port, Version, is_current};
+use super::{Bucket, Object, ObjectMeta, Page, S3Port, Version, Versioning, is_current};
 use crate::cache::Store;
 use crate::svc::SvcError;
 
@@ -99,6 +99,10 @@ impl S3Port for Cached {
         self.inner.list(bucket, prefix, token).await
     }
 
+    async fn versioning(&self, bucket: &str) -> Result<Versioning, SvcError> {
+        self.inner.versioning(bucket).await
+    }
+
     async fn list_versions(&self, bucket: &str, key: &str) -> Result<Vec<Version>, SvcError> {
         self.inner.list_versions(bucket, key).await
     }
@@ -155,7 +159,7 @@ mod tests {
 
     use super::super::contract::{fixture, run, run_writes, seeded_fake};
     use super::super::lazy::Lazy;
-    use super::super::{Bucket, FakeS3, Object, ObjectMeta, Page, S3Port, Version};
+    use super::super::{Bucket, FakeS3, Object, ObjectMeta, Page, S3Port, Version, Versioning};
     use super::*;
     use crate::cache::{Dir, Store};
     use crate::svc::SvcError;
@@ -178,6 +182,9 @@ mod tests {
             token: Option<&str>,
         ) -> Result<Page, SvcError> {
             self.inner.list(bucket, prefix, token).await
+        }
+        async fn versioning(&self, bucket: &str) -> Result<Versioning, SvcError> {
+            self.inner.versioning(bucket).await
         }
         async fn list_versions(&self, bucket: &str, key: &str) -> Result<Vec<Version>, SvcError> {
             self.inner.list_versions(bucket, key).await

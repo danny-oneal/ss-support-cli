@@ -10,9 +10,10 @@ use crate::jsonutil;
 use crate::ops::{Input, Meta, OpResult, Operation, Param, ParamType, Runner, RunnerError, View};
 use crate::svc::ddb::{Item, ItemChange, key_string};
 
-/// The largest whole number a JSON number keeps exactly once it has been
-/// read as a float: 2^53.
-const EXACT_FLOAT_LIMIT: f64 = 9_007_199_254_740_992.0;
+/// The smallest whole number whose neighbour a double cannot tell from it:
+/// 2^53. The preview and the comparison handle numbers as doubles, so a
+/// whole number from here on could not be shown as it would be written.
+const EXACT_LIMIT: f64 = 9_007_199_254_740_992.0;
 
 /// Edits one DynamoDB item: named top-level attributes are replaced or
 /// deleted, and every other attribute is left alone.
@@ -101,13 +102,9 @@ impl Operation for ItemEdit {
                 ])],
             });
         }
-        // Paths the diff defaults ignore are written all the same, so the
-        // preview hides nothing.
-        let opts = Opts {
-            array_match: r.deps.diff.array_match.clone(),
-            ..Opts::default()
-        };
-        let delta = diff::json(&before, &after, &opts);
+        // What the diff defaults ignore, or match out of order, is written
+        // all the same, so the preview uses none of them.
+        let delta = diff::json(&before, &after, &Opts::default());
         let changes = delta.stats.to_string();
         let names = |names: Vec<&str>| match names.as_slice() {
             [] => "—".to_owned(),
@@ -174,13 +171,15 @@ fn invalid(param: &str, value: &str, why: String) -> RunnerError {
     }
 }
 
-/// The attributes to set and the attributes to remove, as given.
+/// The attributes to set and the attributes to remove, as given; a name
+/// given twice to remove counts once.
 ///
 /// # Errors
 ///
-/// A usage error when `set` is not a JSON object, holds a whole number too
-/// large to be written exactly, when nothing is to be set or removed, and
-/// when an attribute is to be both set and removed.
+/// A usage error when `set` is not a JSON object, or holds a whole number
+/// too large to be shown exactly; when `remove` starts like a JSON array but
+/// is not an array of names; when a name is empty; when nothing is to be set
+/// or removed; and when an attribute is to be both set and removed.
 fn requested(input: &Input) -> Result<(Item, Vec<String>), RunnerError> {
     let given = input.str("set").trim();
     let set = if given.is_empty() {
@@ -203,10 +202,52 @@ fn requested(input: &Input) -> Result<(Item, Vec<String>), RunnerError> {
         return Err(invalid(
             "set",
             given,
-            format!("the whole number {number} is too large to be written exactly"),
+            format!(
+                "the whole number {number} is too large for the change to be shown exactly (numbers are handled with double precision)"
+            ),
         ));
     }
-    let remove = input.globs("remove");
+    if set.contains_key("") {
+        return Err(invalid(
+            "set",
+            given,
+            "an attribute name cannot be empty".to_owned(),
+        ));
+    }
+
+    let listed = input.str("remove").trim();
+    let names: Vec<String> = if listed.starts_with('[') {
+        // What starts like a JSON array is one, or is refused: it is never
+        // read as names separated by commas.
+        serde_json::from_str(listed).map_err(|e| {
+            invalid(
+                "remove",
+                listed,
+                format!("not a JSON array of attribute names: {e}"),
+            )
+        })?
+    } else {
+        listed
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let mut remove: Vec<String> = Vec::with_capacity(names.len());
+    for name in names {
+        if name.is_empty() {
+            return Err(invalid(
+                "remove",
+                listed,
+                "an attribute name cannot be empty".to_owned(),
+            ));
+        }
+        if !remove.contains(&name) {
+            remove.push(name);
+        }
+    }
+
     if set.is_empty() && remove.is_empty() {
         return Err(invalid(
             "set",
@@ -220,13 +261,14 @@ fn requested(input: &Input) -> Result<(Item, Vec<String>), RunnerError> {
     Ok((set, remove))
 }
 
-/// The first whole number in `value`, at any depth, that was read as a
-/// float too large to hold it exactly.
-fn inexact_number(value: &Value) -> Option<f64> {
+/// The first whole number in `value`, at any depth, that is too large to be
+/// told from its neighbours once it is handled as a double.
+fn inexact_number(value: &Value) -> Option<String> {
     match value {
-        Value::Number(n) if n.is_f64() => n
+        Value::Number(n) => n
             .as_f64()
-            .filter(|f| f.fract() == 0.0 && f.abs() >= EXACT_FLOAT_LIMIT),
+            .filter(|f| f.fract() == 0.0 && f.abs() >= EXACT_LIMIT)
+            .map(|_| n.to_string()),
         Value::Array(items) => items.iter().find_map(inexact_number),
         Value::Object(map) => map.values().find_map(inexact_number),
         _ => None,
@@ -488,33 +530,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_whole_number_too_large_to_be_written_exactly_is_refused() {
+    async fn a_whole_number_too_large_to_be_shown_exactly_is_refused() {
         let ddb = fixture::fake();
+        let before = stored(&ddb).await;
         let asked = Asked::answering(true);
 
-        let failure = edit(
-            &ddb,
-            &asked,
-            &[(
-                "set",
-                r#"{"limits":{"quota":123456789012345678901234567890}}"#,
-            )],
-        )
-        .await
-        .expect_err("the number would be rounded");
+        // The first is the smallest whole number whose neighbour a double
+        // cannot tell from it.
+        for number in [
+            "9007199254740992",
+            "9007199254740993",
+            "-9007199254740993",
+            "123456789012345678901234567890",
+            "1.5e300",
+        ] {
+            let set = format!(r#"{{"limits":{{"quota":[{number}]}}}}"#);
+            let failure = edit(&ddb, &asked, &[("set", &set)])
+                .await
+                .expect_err("the number could not be shown as it would be written");
 
-        usage(&failure, "set");
-        assert!(
-            format!("{:#}", failure.error).contains("123456789012345678901234567890")
-                || format!("{:#}", failure.error).contains("exactly"),
-            "{:#}",
-            failure.error
-        );
+            usage(&failure, "set");
+            assert!(
+                format!("{:#}", failure.error).contains("too large"),
+                "{number}: {:#}",
+                failure.error
+            );
+        }
         assert_eq!(asked.times(), 0);
+        assert_eq!(stored(&ddb).await, before);
     }
 
     #[tokio::test]
-    async fn numbers_are_stored_as_numbers_with_their_own_digits() {
+    async fn numbers_are_stored_as_numbers() {
         let ddb = fixture::fake();
         let asked = Asked::answering(true);
 
@@ -523,14 +570,14 @@ mod tests {
             &asked,
             &[(
                 "set",
-                r#"{"count":9007199254740993,"ratio":0.5,"limits":{"rps":250}}"#,
+                r#"{"count":9007199254740991,"ratio":0.5,"limits":{"rps":250}}"#,
             )],
         )
         .await
         .expect("edited");
 
         let item = stored(&ddb).await;
-        assert_eq!(item["count"].as_u64(), Some(9_007_199_254_740_993));
+        assert_eq!(item["count"].as_u64(), Some(9_007_199_254_740_991));
         assert_eq!(item["ratio"], json!(0.5));
         assert_eq!(item["limits"], json!({"rps": 250}));
     }
@@ -685,5 +732,81 @@ mod tests {
             .expect("edited");
 
         assert!(stored(&ddb).await.get("a,b").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_remove_list_that_is_not_a_json_array_of_names_is_a_usage_error() {
+        let ddb = fixture::fake();
+        let before = stored(&ddb).await;
+        let asked = Asked::answering(true);
+
+        for bad in [r#"["Tier",]"#, r#"["Tier", 1]"#, "[Tier]", r#"[""]"#] {
+            let failure = edit(&ddb, &asked, &[("remove", bad)])
+                .await
+                .expect_err("not a list of names");
+            usage(&failure, "remove");
+        }
+        assert_eq!(asked.times(), 0);
+        assert_eq!(stored(&ddb).await, before);
+    }
+
+    #[tokio::test]
+    async fn an_empty_attribute_name_is_a_usage_error() {
+        let ddb = fixture::fake();
+        let asked = Asked::answering(true);
+
+        let failure = edit(&ddb, &asked, &[("set", r#"{"":1}"#)])
+            .await
+            .expect_err("an attribute has a name");
+
+        usage(&failure, "set");
+        assert_eq!(asked.times(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_name_given_twice_is_removed_once() {
+        let ddb = fixture::fake();
+        let asked = Asked::answering(true);
+
+        edit(&ddb, &asked, &[("remove", "Tier, updatedAt,Tier")])
+            .await
+            .expect("edited");
+
+        let seen = asked.seen.lock().unwrap();
+        assert_eq!(field(&seen[0].preview[0], "Remove"), "Tier, updatedAt");
+    }
+
+    #[tokio::test]
+    async fn a_reordered_list_is_shown_though_the_diff_defaults_match_it_by_key() {
+        let ddb = fixture::fake();
+        let Value::Object(mut item) = stored(&ddb).await else {
+            unreachable!("an item is an object")
+        };
+        item.insert("rules".to_owned(), json!([{"id": "a"}, {"id": "b"}]));
+        ddb.put(fixture::TABLE, item);
+        let mut deps = fixture::deps(ddb.clone());
+        deps.diff
+            .array_match
+            .insert("$.rules[*]".to_owned(), "id".to_owned());
+        let asked = Asked::answering(true);
+
+        Runner::new(deps)
+            .confirmer(asked.clone())
+            .execute(
+                &ItemEdit,
+                input(&[("set", r#"{"rules":[{"id":"b"},{"id":"a"}]}"#)]),
+            )
+            .await
+            .expect("edited");
+
+        let seen = asked.seen.lock().unwrap();
+        let View::Diff { delta, .. } = &seen[0].preview[1] else {
+            panic!("the second preview view is a diff: {:?}", seen[0].preview);
+        };
+        assert!(
+            delta.stats.total() > 0,
+            "the reorder is written, so it is shown"
+        );
+        assert_ne!(field(&seen[0].preview[0], "Changes"), "no changes");
     }
 }

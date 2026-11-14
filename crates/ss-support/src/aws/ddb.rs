@@ -192,7 +192,10 @@ impl DdbPort for AwsDdb {
 
     /// The item is read first, so that what the change expects is compared
     /// with the stored values as DynamoDB holds them (a set stays a set),
-    /// and the write is made conditional on those same stored values.
+    /// and the write is made conditional on those same stored values. When
+    /// DynamoDB refuses the condition the item is read once more, to tell a
+    /// deleted item and a change that has already been made from a change
+    /// by someone else.
     async fn update_item(
         &self,
         table: &str,
@@ -203,22 +206,65 @@ impl DdbPort for AwsDdb {
         let what = format!("{table} {}", key_string(key));
         let key_av = key_to_av(key)?;
         let stored = self
+            .read_native(table, &what, &key_av)
+            .await?
+            .ok_or_else(|| SvcError::not_found(what.clone()))?;
+        let request = update_request(&what, key, change, &stored)?;
+        match self
+            .send_update(table, &what, key_av.clone(), request)
+            .await
+        {
+            Err(refusal) if refusal.is_changed() => {
+                let now = self
+                    .read_native(table, &what, &key_av)
+                    .await?
+                    .map(item_from_av)
+                    .transpose()?;
+                after_refusal(&what, change, now.as_ref(), refusal)
+            }
+            other => other,
+        }
+    }
+}
+
+impl AwsDdb {
+    /// The item at `key` as DynamoDB holds it, read consistently; `None`
+    /// when there is no such item.
+    async fn read_native(
+        &self,
+        table: &str,
+        what: &str,
+        key: &HashMap<String, AttributeValue>,
+    ) -> Result<Option<HashMap<String, AttributeValue>>, SvcError> {
+        let out = self
             .client
             .get_item()
             .table_name(table)
-            .set_key(Some(key_av.clone()))
+            .set_key(Some(key.clone()))
             .consistent_read(true)
             .send()
             .await
-            .map_err(|e| svc_error(&what, e))?
-            .item
-            .filter(|item| !item.is_empty())
-            .ok_or_else(|| SvcError::not_found(what.clone()))?;
-        let request = update_request(&what, key, change, &stored)?;
+            .map_err(|e| svc_error(what, e))?;
+        Ok(out.item.filter(|item| !item.is_empty()))
+    }
+
+    /// Sends one conditional update.
+    ///
+    /// # Errors
+    ///
+    /// [`SvcError::Changed`] when DynamoDB finds that the condition does not
+    /// hold; nothing is written then.
+    async fn send_update(
+        &self,
+        table: &str,
+        what: &str,
+        key: HashMap<String, AttributeValue>,
+        request: UpdateRequest,
+    ) -> Result<(), SvcError> {
         self.client
             .update_item()
             .table_name(table)
-            .set_key(Some(key_av))
+            .set_key(Some(key))
             .update_expression(request.update)
             .condition_expression(request.condition)
             .set_expression_attribute_names(Some(request.names))
@@ -226,14 +272,30 @@ impl DdbPort for AwsDdb {
             .send()
             .await
             .map_err(|e| {
-                // The item changed, or went, between the read and the write.
                 if e.code() == Some("ConditionalCheckFailedException") {
-                    SvcError::changed(what.clone())
+                    SvcError::changed(what)
                 } else {
-                    svc_error(&what, e)
+                    svc_error(what, e)
                 }
             })?;
         Ok(())
+    }
+}
+
+/// What a refused condition means, given the item as it is `now`: not found
+/// when it has gone; nothing left to do when it already holds what the
+/// change writes, as after an attempt whose answer was lost; otherwise the
+/// refusal itself.
+fn after_refusal(
+    what: &str,
+    change: &ItemChange,
+    now: Option<&Item>,
+    refusal: SvcError,
+) -> Result<(), SvcError> {
+    match now {
+        None => Err(SvcError::not_found(what)),
+        Some(item) if change.is_applied_to(item) => Ok(()),
+        Some(_) => Err(refusal),
     }
 }
 
@@ -602,6 +664,24 @@ mod tests {
         assert_eq!(request.values.get(":e1"), Some(&s("old")));
         assert_eq!(request.values.get(":e2"), Some(&n("3")));
         assert_eq!(request.values.len(), 4);
+    }
+
+    #[test]
+    fn a_refused_condition_is_told_apart_by_what_the_item_holds_now() {
+        let change = a_change(json!({"Tier": "silver"}), &["note"], &[]);
+        let refusal = || SvcError::changed(WHAT);
+
+        // The item has gone.
+        let gone = after_refusal(WHAT, &change, None, refusal()).expect_err("no item");
+        assert!(gone.is_not_found(), "{gone}");
+        // The item already holds what the change writes: an earlier attempt
+        // of this write landed, or someone else made the same change.
+        let done = object(json!({"TenantId": "acme", "Tier": "silver"}));
+        after_refusal(WHAT, &change, Some(&done), refusal()).expect("nothing left to do");
+        // Anything else is a change by someone else.
+        let other = object(json!({"TenantId": "acme", "Tier": "gold", "note": "x"}));
+        let changed = after_refusal(WHAT, &change, Some(&other), refusal()).expect_err("changed");
+        assert!(changed.is_changed(), "{changed}");
     }
 
     #[test]
@@ -1160,7 +1240,51 @@ mod dynalite {
         let Some(env) = connect().await else { return };
         let table = format!("ss-it-writes-{}", env.nanos);
         create_contract_table(&env, &table).await;
+        // Not `run_document_writes`: dynalite compares a map or a list in a
+        // condition by identity, so an update that expects one never goes
+        // through there.
         contract::run_writes(&env.port(), &table, &format!("ss-it-missing-{}", env.nanos)).await;
+    }
+
+    #[tokio::test]
+    async fn a_condition_the_server_refuses_is_a_change_and_writes_nothing() {
+        let Some(env) = connect().await else { return };
+        let table = format!("ss-it-refused-{}", env.nanos);
+        create_contract_table(&env, &table).await;
+        let port = env.port();
+        let Value::Object(key) = json!({"TenantId": "acme", "Version": "V1"}) else {
+            unreachable!("a JSON object literal is an object")
+        };
+        let key_av = super::key_to_av(&key).expect("key");
+        let what = "the item";
+        let mut held = port
+            .read_native(&table, what, &key_av)
+            .await
+            .expect("read")
+            .expect("the item is there");
+        // The request is built from a reading of the item that is no longer
+        // true, as when someone writes between the read and the write.
+        held.insert("Tier".to_owned(), AttributeValue::S("platinum".to_owned()));
+        let Value::Object(set) = json!({"note": "written"}) else {
+            unreachable!("a JSON object literal is an object")
+        };
+        let change = ss_core::svc::ddb::ItemChange {
+            set,
+            remove: Vec::new(),
+            expect: [("Tier".to_owned(), Some(json!("platinum")))].into(),
+        };
+        let request =
+            super::update_request(what, &key, &change, &held).expect("the older reading agrees");
+
+        let err = port
+            .send_update(&table, what, key_av, request)
+            .await
+            .expect_err("the server finds the item is not as expected");
+
+        assert!(err.is_changed(), "{err}");
+        let item = port.get_item(&table, &key).await.expect("the item");
+        assert_eq!(item["Tier"], json!("gold"));
+        assert!(!item.contains_key("note"), "{item:?}");
     }
 
     #[tokio::test]

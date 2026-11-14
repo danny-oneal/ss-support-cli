@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use super::{Bucket, Object, ObjectMeta, Page, S3Port, Version, is_current};
+use super::{Bucket, Object, ObjectMeta, Page, S3Port, Version, Versioning, is_current};
 use crate::svc::SvcError;
 
 /// One entry in a key's history.
@@ -30,6 +30,9 @@ enum Row {
 struct State {
     /// bucket -> key -> history, oldest first.
     buckets: BTreeMap<String, BTreeMap<String, Vec<Entry>>>,
+    /// Buckets that do not keep versions the usual way; every other bucket
+    /// has versioning enabled.
+    versioning: BTreeMap<String, Versioning>,
     /// Shared by [`FakeS3::put`], [`FakeS3::delete`], and copies for
     /// generated ids.
     counter: u64,
@@ -60,6 +63,12 @@ impl FakeS3 {
     /// Creates an empty bucket; does nothing when it already exists.
     pub fn create_bucket(&self, bucket: &str) {
         self.lock().buckets.entry(bucket.to_owned()).or_default();
+    }
+
+    /// Sets what [`S3Port::versioning`] reports for `bucket`. Nothing else
+    /// changes: the fake goes on keeping every version it is given.
+    pub fn set_versioning(&self, bucket: &str, versioning: Versioning) {
+        self.lock().versioning.insert(bucket.to_owned(), versioning);
     }
 
     /// Appends a version as the newest, creating the bucket when needed. The
@@ -149,6 +158,18 @@ impl S3Port for FakeS3 {
                 created: None,
             })
             .collect())
+    }
+
+    async fn versioning(&self, bucket: &str) -> Result<Versioning, SvcError> {
+        let state = self.lock();
+        if !state.buckets.contains_key(bucket) {
+            return Err(SvcError::not_found(bucket));
+        }
+        Ok(state
+            .versioning
+            .get(bucket)
+            .copied()
+            .unwrap_or(Versioning::Enabled))
     }
 
     async fn list(
@@ -537,5 +558,23 @@ mod tests {
             s3.get_version("b", "k", "").await.expect("current").body,
             b"two"
         );
+    }
+
+    #[tokio::test]
+    async fn a_bucket_keeps_versions_unless_told_otherwise() {
+        let s3 = three_versions();
+        assert_eq!(
+            s3.versioning("b").await.expect("bucket"),
+            Versioning::Enabled
+        );
+
+        s3.set_versioning("b", Versioning::Suspended);
+        assert_eq!(
+            s3.versioning("b").await.expect("bucket"),
+            Versioning::Suspended
+        );
+
+        let err = s3.versioning("nope").await.expect_err("no such bucket");
+        assert!(err.is_not_found(), "{err}");
     }
 }

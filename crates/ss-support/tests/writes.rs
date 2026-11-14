@@ -13,7 +13,7 @@ use ss_core::guard::Class;
 use ss_core::ops;
 use ss_core::svc::ddb::contract::{seed_items, table_info};
 use ss_core::svc::ddb::{DdbPort, FakeDdb, Key};
-use ss_core::svc::s3::{FakeS3, S3Port};
+use ss_core::svc::s3::{FakeS3, S3Port, Versioning};
 use ss_support::{Exit, Io, Services};
 
 const BUCKET: &str = "cfg-nonprod";
@@ -404,4 +404,24 @@ async fn the_write_operations_are_listed_and_described() {
     for want in ["destructive", "--table", "--key", "--set", "--remove"] {
         assert!(out.contains(want), "missing {want:?} in {out}");
     }
+}
+
+#[tokio::test]
+async fn a_restore_where_versions_are_not_kept_exits_1_and_asks_nothing() {
+    let root = tempfile::tempdir().expect("tempdir");
+    allow_dev(root.path());
+    let s3 = s3();
+    s3.set_versioning(BUCKET, Versioning::Suspended);
+    let services = Services::isolated(root.path()).with_s3(Arc::new(s3.clone()));
+
+    let (exit, out, err) = ss_with(services, &RESTORE, "y\n").await;
+
+    assert_eq!(exit, Exit::Failed);
+    assert!(
+        err.contains("cfg-nonprod is not keeping versions (versioning is suspended)"),
+        "{err}"
+    );
+    assert_eq!(err.lines().count(), 1, "nothing was asked: {err}");
+    assert_eq!(out, "");
+    assert_eq!(version_ids(&s3).await, ["v2", "v1"]);
 }

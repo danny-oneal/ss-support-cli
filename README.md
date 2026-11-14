@@ -290,6 +290,12 @@ SS_SUPPORT_REGION=us-east-1 SS_SUPPORT_DDB_ENDPOINT=http://127.0.0.1:8000 \
 `SS_SUPPORT_DDB_TEST_ENDPOINT=http://127.0.0.1:8000 make contract-ddb` runs
 the DynamoDB contract suite against the same server.
 
+dynalite never finds two maps or two lists equal in a condition, which
+DynamoDB compares by content. `ddb.item-edit` therefore cannot change or
+remove an attribute that holds a map or a list there (it reports `changed
+since it was read`), and the contract suite leaves that part to the
+in-memory store.
+
 ## Writes
 
 Two operations change state. Every other operation only reads.
@@ -311,49 +317,76 @@ ss-support run ddb.item-edit --env dev --table tenants --key TenantId=acme,Versi
 Both run only in an environment listed under `environments` in the config
 file. Anywhere else the run is refused before either service is reached, and
 no flag overrides that. Both show what will change before they ask: the diff
-from what is stored now to what will be stored. Nothing is left out of it;
-the `diff.ignore` paths of the config apply to comparisons, not to this
-preview. `--dry-run` shows the same and stops there. In the TUI the question
-is always asked, whatever `--yes` says, and `R` on a version in the S3
-browser opens the restore form filled in.
+from what is stored now to what will be stored. The `diff.ignore` paths and
+the `diff.array_match` keys of the config apply to comparisons, not to this
+preview, so a path that is usually ignored and an array that is only
+reordered are both shown. `--dry-run` shows the same and stops there. In the
+TUI the question is always asked, whatever `--yes` says, and `R` on a version
+in the S3 browser opens the restore form filled in.
 
 **`s3.restore-version`** copies the version onto its key on the server, so
 the version that was current stays in the history and can be restored the
-same way. The copy carries the content, the content type, and the user
-metadata. It does not carry the object's ACL, it takes the bucket's default
-storage class and encryption, and an object over 5 GB cannot be copied this
-way. The operation does nothing when the version is already the current one.
-It refuses a delete marker (restore an earlier version to undelete), a
-version whose id is `null` unless it is the current one, and an object whose
-current version has the id `null`: the bucket is not keeping versions of it,
-so the copy would overwrite the current content for good.
+same way.
+
+- It runs only where the bucket's versioning is enabled. Where versioning
+  is off the copy would overwrite the object, and where it is suspended the
+  copy would take the place of whichever version has no id, for good. Asking
+  the bucket needs `s3:GetBucketVersioning`.
+- It does nothing when the version is already the current one. It refuses a
+  delete marker (restore an earlier version to undelete) and a version whose
+  id is `null` unless that is the current one.
+- The copy carries the content, the content type, the user metadata, and the
+  tags (copying tags needs the permissions to read and write them). It does
+  not carry the ACL, an object-lock retention, or a legal hold. It is stored
+  in the STANDARD storage class with the bucket's default encryption.
+- A version that is archived, or encrypted with a key the caller supplies,
+  cannot be copied. Like any write, the copy fires the bucket's event
+  notifications and replication.
+- The preview reads both versions, so an object over 32 MiB cannot be
+  restored with this tool.
+- When two versions are not the same bytes but differ only in spacing, the
+  order of keys, or digits beyond double precision, the preview says so
+  instead of showing a change.
 
 **`ddb.item-edit`** replaces each attribute named in `--set` with the given
 JSON value, the whole value: a nested attribute is not merged. It deletes
-each attribute named in `--remove` (comma-separated, or a JSON array). Every
-other attribute is left alone. DynamoDB keeps no history, so the previous
-values are gone once written, which is why the table name must be typed. Key
-attributes cannot be edited. A whole number is written with its own digits
-when it fits in 64 bits, and refused, not rounded, when it does not. An
-attribute that holds a set or binary data cannot be set, because JSON cannot
-say which it is; it can be removed. An edit that would change nothing writes
-nothing and asks nothing.
+each attribute named in `--remove`: names separated by commas, or a JSON
+array of names (a value that starts with `[` must be one). Every other
+attribute is left alone. DynamoDB keeps no history, so the previous values
+are gone once written, which is why the table name must be typed.
+
+- Key attributes cannot be edited.
+- Numbers are handled with double precision. A whole number of 2^53
+  (9007199254740992) or more in `--set` is refused, because the change could
+  not be shown exactly; so is a key with such a number, in every DynamoDB
+  operation, because it would name a different item.
+- `null` as a value stores a NULL attribute; it does not remove one. When a
+  name appears twice in `--set`, the last value is used.
+- An attribute that holds a set or binary data cannot be set, because JSON
+  cannot say which it is; it can be removed. This refusal comes after the
+  confirmation.
+- An edit that would change nothing writes nothing and asks nothing.
 
 **Stale previews.** A write is not made on top of something the operator did
 not see. The restore reads the history again after the confirmation and
 stops when the object's current version is no longer the one that was shown.
 A writer that lands between that check and the copy is not caught; its
-version stays in the history. The edit is conditional in DynamoDB itself: it
-is made only while the item exists and every attribute it touches still
-holds the value that was shown. An attribute the edit does not touch may
-have changed meanwhile, and is kept. Either way the run fails with `changed
-since it was read` and nothing is written.
+version stays in the history. The edit reads the item again at the moment of
+the write, compares every attribute it touches with what was shown, and
+makes the write conditional in DynamoDB on those stored values. That
+comparison is of the values as JSON, in which a list and a set with the same
+members look the same. An attribute the edit does not touch may have changed
+meanwhile, and is kept. Either way the run fails with `changed since it was
+read` and nothing is written. When DynamoDB refuses the condition, the item
+is read once more: an item that has gone is reported as not found, and one
+that already holds the change counts as done.
 
 **Audit.** Every run of these two operations leaves one entry in the audit
-log when it ends: ok, declined, denied, dry-run, or error. The entry is
-written after the change, so a process killed in between leaves a change
-without an entry. A failed audit write is a warning (on stderr; in the TUI
-it stays above the result) and does not undo the change.
+log when it ends: ok, declined, denied, dry-run, or error. The entry records
+the parameters as given, including the values in `--set`. It is written
+after the change, so a process killed in between leaves a change without an
+entry. A failed audit write is a warning (on stderr; in the TUI it stays
+above the result) and does not undo the change.
 
 ## Cross-service
 

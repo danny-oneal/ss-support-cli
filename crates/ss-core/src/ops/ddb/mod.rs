@@ -84,6 +84,10 @@ pub(crate) fn suggest_indexes() -> SuggestFn {
     })
 }
 
+/// The smallest magnitude at which a double no longer tells a whole number
+/// from its neighbours: 2^53.
+const EXACT_KEY_LIMIT: f64 = 9_007_199_254_740_992.0;
+
 /// The key attribute names of `info`: the hash key, then the sort key.
 fn key_attribute_names(info: &TableInfo) -> Vec<&str> {
     std::iter::once(info.hash_key.as_str())
@@ -116,8 +120,8 @@ pub(crate) fn refuse_binary_key(info: &TableInfo) -> anyhow::Result<()> {
 ///
 /// Returns an error when `spec` is blank, is not valid JSON though it starts
 /// with `{`, has a part that is not `name=value`, names attributes other than
-/// the table's key attributes or omits some of them, or the table has a
-/// binary key attribute.
+/// the table's key attributes or omits some of them, holds a number too
+/// large to be handled exactly, or the table has a binary key attribute.
 pub(crate) fn parse_key(spec: &str, info: &TableInfo) -> anyhow::Result<Key> {
     let spec = spec.trim();
     if spec.is_empty() {
@@ -170,6 +174,13 @@ pub(crate) fn parse_key(spec: &str, info: &TableInfo) -> anyhow::Result<Key> {
     for (name, value) in &mut key {
         let attr_type = info.attr_types.get(name).copied();
         *value = coerce(std::mem::take(value), attr_type);
+        // Numbers are handled as doubles, which cannot tell such a number
+        // from its neighbours: the key would name another item.
+        if let Value::Number(number) = value
+            && number.as_f64().is_some_and(|f| f.abs() >= EXACT_KEY_LIMIT)
+        {
+            bail!("key attribute {name}: the number is too large to be handled exactly");
+        }
     }
     Ok(key)
 }
@@ -582,5 +593,25 @@ mod tests {
             "{err}"
         );
         assert!(port(&fixture::deps(fixture::fake())).is_ok());
+    }
+
+    #[test]
+    fn a_numeric_key_too_large_to_be_exact_is_refused() {
+        let info = typed_info();
+
+        for spec in [
+            "Id=9007199254740993,Sort=a",
+            "Id=9007199254740992,Sort=a",
+            r#"{"Id":9007199254740993,"Sort":"a"}"#,
+            "Id=-9007199254740993,Sort=a",
+        ] {
+            let err = parse_key(spec, &info).expect_err("the key would name another item");
+            assert!(
+                err.to_string().contains("too large to be handled exactly"),
+                "{spec}: {err}"
+            );
+        }
+        let key = parse_key("Id=9007199254740991,Sort=a", &info).expect("exact");
+        assert_eq!(key["Id"].as_f64(), Some(9_007_199_254_740_991.0));
     }
 }

@@ -544,14 +544,16 @@ impl ProgressScreen {
             FailureKind::Declined => ("declined", false),
             FailureKind::Cancelled => ("cancelled", false),
         };
-        let mut detail = format!("{:#}", failure.error);
+        // The status line is gone at the next key; these are not. They come
+        // first, where a long error cannot push them out of the panel.
+        let mut detail = String::new();
+        for warning in &self.warnings {
+            detail.push_str(&format!("warning: {warning}\n\n"));
+        }
+        detail.push_str(&format!("{:#}", failure.error));
         if !failure.views.is_empty() {
             detail.push_str("\n\n");
             detail.push_str(&render::text(&failure.views));
-        }
-        // The status line is gone at the next key; these are not.
-        for warning in &self.warnings {
-            detail.push_str(&format!("\n\nwarning: {warning}"));
         }
         self.ended = Some(Ended {
             headline,
@@ -1380,6 +1382,12 @@ mod tests {
         assert_eq!(
             shown.matches("warning: audit log: disk full").count(),
             1,
+            "{shown}"
+        );
+        // Above the error, so that a long error cannot push it out of the
+        // panel.
+        assert!(
+            shown.find("warning: audit log") < shown.rfind("boom"),
             "{shown}"
         );
     }

@@ -687,6 +687,11 @@ mod tests {
             self.inner.list(bucket, prefix, token).await
         }
 
+        async fn versioning(&self, bucket: &str) -> Result<ss_core::svc::s3::Versioning, SvcError> {
+            self.check()?;
+            self.inner.versioning(bucket).await
+        }
+
         async fn list_versions(&self, bucket: &str, key: &str) -> Result<Vec<Version>, SvcError> {
             self.check()?;
             self.inner.list_versions(bucket, key).await

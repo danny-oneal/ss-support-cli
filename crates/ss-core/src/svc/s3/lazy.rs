@@ -6,7 +6,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use tokio::sync::OnceCell;
 
-use super::{Bucket, Object, ObjectMeta, Page, S3Port, Version};
+use super::{Bucket, Object, ObjectMeta, Page, S3Port, Version, Versioning};
 use crate::ops::BoxFuture;
 use crate::svc::SvcError;
 
@@ -56,6 +56,10 @@ impl S3Port for Lazy {
         token: Option<&str>,
     ) -> Result<Page, SvcError> {
         self.resolve().await?.list(bucket, prefix, token).await
+    }
+
+    async fn versioning(&self, bucket: &str) -> Result<Versioning, SvcError> {
+        self.resolve().await?.versioning(bucket).await
     }
 
     async fn list_versions(&self, bucket: &str, key: &str) -> Result<Vec<Version>, SvcError> {

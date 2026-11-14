@@ -173,6 +173,16 @@ impl ItemChange {
         Ok(())
     }
 
+    /// Whether `stored` already holds everything the change writes: every
+    /// attribute to set has the value given, and no attribute to remove is
+    /// there. Numbers compare by value.
+    pub fn is_applied_to(&self, stored: &Item) -> bool {
+        self.set
+            .iter()
+            .all(|(name, value)| same(stored.get(name), Some(value)))
+            && self.remove.iter().all(|name| !stored.contains_key(name))
+    }
+
     /// The first attribute, by name, that `stored` no longer holds as the
     /// change expects; `None` when every expectation holds. Numbers compare
     /// by value, so `1` and `1.0` are the same.
@@ -470,6 +480,23 @@ mod tests {
                 Some(name),
                 "{broken:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_change_is_applied_once_the_item_holds_what_it_writes() {
+        let stored = item(json!({"Tier": "gold", "limits": {"rps": 50.0}, "note": "x"}));
+
+        assert!(
+            change(json!({"Tier": "gold", "limits": {"rps": 50}}), &["gone"])
+                .is_applied_to(&stored)
+        );
+        for unapplied in [
+            change(json!({"Tier": "silver"}), &[]),
+            change(json!({"other": 1}), &[]),
+            change(json!({"Tier": "gold"}), &["note"]),
+        ] {
+            assert!(!unapplied.is_applied_to(&stored), "{unapplied:?}");
         }
     }
 }

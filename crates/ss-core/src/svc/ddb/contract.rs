@@ -225,6 +225,8 @@ pub async fn run(port: &dyn DdbPort, table: &str, missing_table: &str) {
 
 /// Checks the port's one write against the suite. It changes item `acme`
 /// `V2` of `table`, so call it after [`run`] or on a table of its own.
+/// Everything it expects of the stored item is a string or a number;
+/// [`run_document_writes`] covers maps and lists.
 ///
 /// `table` must have been created from [`table_info`] and seeded with
 /// [`seed_items`]; `missing_table` must not exist.
@@ -239,9 +241,9 @@ pub async fn run_writes(port: &dyn DdbPort, table: &str, missing_table: &str) {
     let before = read().await;
 
     let set = change(
-        json!({"limits": {"rps": 75, "burst": 100}, "note": "raised"}),
+        json!({"limits": {"rps": 75, "burst": 100}, "note": "raised", "weight": 75}),
         &[],
-        &[("limits", before.get("limits").cloned()), ("note", None)],
+        &[("Tier", before.get("Tier").cloned()), ("note", None)],
     );
     ok(
         "update_item sets attributes",
@@ -276,7 +278,7 @@ pub async fn run_writes(port: &dyn DdbPort, table: &str, missing_table: &str) {
         &["note"],
         &[
             ("note", Some(json!("raised"))),
-            ("limits", Some(json!({"burst": 100.0, "rps": 75}))),
+            ("weight", Some(json!(75.0))),
         ],
     );
     ok(
@@ -346,6 +348,92 @@ pub async fn run_writes(port: &dyn DdbPort, table: &str, missing_table: &str) {
         "a refused update_item writes nothing",
         &read().await,
         &after_remove,
+    );
+}
+
+/// Checks the port's one write where what is expected of the stored item is
+/// a map or a list. It changes item `acme` `V1` of `table`, which must have
+/// been created from [`table_info`] and seeded with [`seed_items`].
+///
+/// This needs a store that compares maps and lists in a condition by their
+/// content, as DynamoDB does. dynalite compares them by identity and never
+/// finds two equal, so this part cannot be run against it.
+///
+/// # Panics
+///
+/// Panics, naming the failed check and the observed value, on the first
+/// violation.
+pub async fn run_document_writes(port: &dyn DdbPort, table: &str) {
+    let target = key("acme", "V1");
+    let read = || async { ok("get_item", port.get_item(table, &target).await) };
+
+    // The map as it was read, its members in another order and one number
+    // spelled differently.
+    let on_a_map = change(
+        json!({"tags": ["a", "b"]}),
+        &[],
+        &[
+            ("limits", Some(json!({"burst": 200.0, "rps": 100}))),
+            ("tags", None),
+        ],
+    );
+    ok(
+        "update_item expecting a map",
+        port.update_item(table, &target, &on_a_map).await,
+    );
+    check_eq(
+        "update_item expecting a map wrote the list",
+        &read().await.get("tags"),
+        &Some(&json!(["a", "b"])),
+    );
+
+    let on_a_list = change(
+        json!({"limits": {"rps": 150}}),
+        &[],
+        &[
+            ("tags", Some(json!(["a", "b"]))),
+            ("limits", Some(json!({"rps": 100, "burst": 200}))),
+        ],
+    );
+    ok(
+        "update_item expecting a list",
+        port.update_item(table, &target, &on_a_list).await,
+    );
+    let after = read().await;
+    check_eq(
+        "update_item expecting a list replaced the whole map",
+        &after.get("limits"),
+        &Some(&json!({"rps": 150})),
+    );
+
+    for (name, expect) in [
+        (
+            "a map with a member that differs",
+            ("limits", Some(json!({"rps": 151}))),
+        ),
+        ("a map with a member missing", ("limits", Some(json!({})))),
+        (
+            "a map with a member too many",
+            ("limits", Some(json!({"rps": 150, "burst": 200}))),
+        ),
+        ("a list in another order", ("tags", Some(json!(["b", "a"])))),
+        (
+            "a list with an element missing",
+            ("tags", Some(json!(["a"]))),
+        ),
+    ] {
+        let stale = change(json!({"Tier": "silver"}), &[], &[expect]);
+        match port.update_item(table, &target, &stale).await {
+            Err(e) if e.is_changed() => {}
+            other => {
+                panic!("contract: update_item with {name} should report a change, got {other:?}")
+            }
+        }
+    }
+    check_eq(
+        "a refused update_item writes nothing",
+        &read().await,
+        &after,
     );
 }
 

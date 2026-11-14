@@ -50,6 +50,28 @@ pub struct ObjectMeta {
     pub etag: String,
 }
 
+/// Whether a bucket keeps the versions of its objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Versioning {
+    /// Every write adds a version.
+    Enabled,
+    /// Versions written earlier are kept, but a write now takes the place
+    /// of the version that has no id.
+    Suspended,
+    /// The bucket has never kept versions.
+    Off,
+}
+
+impl std::fmt::Display for Versioning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Enabled => "enabled",
+            Self::Suspended => "suspended",
+            Self::Off => "off",
+        })
+    }
+}
+
 /// One page of a prefix listing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Page {
@@ -111,6 +133,13 @@ impl Object {
 pub trait S3Port: Send + Sync {
     /// Every bucket visible to the caller.
     async fn list_buckets(&self) -> Result<Vec<Bucket>, SvcError>;
+
+    /// Whether `bucket` keeps the versions of its objects.
+    ///
+    /// # Errors
+    ///
+    /// [`SvcError::NotFound`] when the bucket does not exist.
+    async fn versioning(&self, bucket: &str) -> Result<Versioning, SvcError>;
 
     /// One page of the keys and common prefixes under `prefix`, resuming
     /// after `token` when given.

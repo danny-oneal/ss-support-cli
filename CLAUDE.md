@@ -88,7 +88,7 @@ ratatui + crossterm. `shell.rs` owns a stack of `Screen`s (`screen.rs`: `title`,
 - Config structs use `serde_yaml_ng` with `#[serde(deny_unknown_fields, default)]`.
 - `async_trait` only on dyn-dispatched traits (`Operation`, future resource ports); native `async fn` elsewhere.
 - Kubernetes access is read-only by design — no rollout restart or scaling operations.
-- Exactly two operations write, each through the one write of its port: `s3.restore-version` (`S3Port::copy_version`) and `ddb.item-edit` (`DdbPort::update_item`); `tests/writes.rs` pins the list. A write operation previews the full change (the config's ignore globs are for comparisons, not for a write's preview) and, inside `r.mutate`, writes only while what it previewed still holds, failing with `SvcError::Changed` otherwise. The DynamoDB adapter conditions on the stored native values, not on their JSON rendering, so a set stays a set.
+- Exactly two operations write, each through the one write of its port: `s3.restore-version` (`S3Port::copy_version`) and `ddb.item-edit` (`DdbPort::update_item`); `tests/writes.rs` pins the list. A write operation previews the full change (the config's ignore globs and keyed array matching are for comparisons, not for a write's preview) and, inside `r.mutate`, writes only while what it previewed still holds, failing with `SvcError::Changed` otherwise. The DynamoDB adapter conditions on the stored native values, not on their JSON rendering, so a set stays a set.
 - Update `CHANGELOG.md` (Keep a Changelog, `[Unreleased]`) for user-visible changes; commits use Conventional Commits with a scope (`fix(cli): …`). The README flag table and exit-code list must match behavior.
 
 ## Docs

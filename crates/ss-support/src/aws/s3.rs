@@ -14,9 +14,12 @@ use aws_config::SdkConfig;
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::primitives::DateTime as SdkDateTime;
+use aws_sdk_s3::types::BucketVersioningStatus;
 use chrono::{DateTime, Utc};
 use ss_core::svc::SvcError;
-use ss_core::svc::s3::{Bucket, CURRENT, Object, ObjectMeta, Page, S3Port, Version, is_current};
+use ss_core::svc::s3::{
+    Bucket, CURRENT, Object, ObjectMeta, Page, S3Port, Version, Versioning, is_current,
+};
 
 /// The default cap on an object body read into memory: 32 MiB.
 pub(crate) const MAX_BODY: u64 = 32 << 20;
@@ -129,6 +132,22 @@ impl S3Port for AwsS3 {
             objects,
             prefixes,
             next,
+        })
+    }
+
+    async fn versioning(&self, bucket: &str) -> Result<Versioning, SvcError> {
+        let out = self
+            .client
+            .get_bucket_versioning()
+            .bucket(bucket)
+            .send()
+            .await
+            .map_err(|e| svc_error(bucket, e, false))?;
+        // A bucket that has never kept versions reports no status at all.
+        Ok(match out.status() {
+            Some(BucketVersioningStatus::Enabled) => Versioning::Enabled,
+            Some(BucketVersioningStatus::Suspended) => Versioning::Suspended,
+            _ => Versioning::Off,
         })
     }
 

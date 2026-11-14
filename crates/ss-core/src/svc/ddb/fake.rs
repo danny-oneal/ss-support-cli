@@ -982,4 +982,12 @@ mod tests {
             .expect("index");
         assert_eq!(versions(&gold), ["V2"]);
     }
+
+    #[tokio::test]
+    async fn fake_satisfies_the_write_contract() {
+        let ddb = tenants();
+
+        contract::run_writes(&ddb, "tenants", "nope").await;
+        contract::run_document_writes(&ddb, "tenants").await;
+    }
 }

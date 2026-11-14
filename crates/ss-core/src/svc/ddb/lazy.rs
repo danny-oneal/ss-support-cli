@@ -154,6 +154,7 @@ mod tests {
         let (lazy, built) = counting(fake.clone());
 
         contract::run_writes(&lazy, "tenants", "nope").await;
+        contract::run_document_writes(&lazy, "tenants").await;
 
         assert_eq!(built.load(Ordering::SeqCst), 1);
         let stored = fake

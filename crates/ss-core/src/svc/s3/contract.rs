@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use super::{CURRENT, S3Port, Version, is_current};
+use super::{CURRENT, S3Port, Version, Versioning, is_current};
 use crate::svc::SvcError;
 
 #[cfg(test)]
@@ -135,6 +135,7 @@ pub async fn run(fx: &Fixture<'_>) {
         fx.version_ids.len()
     );
     list_buckets(fx).await;
+    versioning(fx).await;
     list(fx).await;
     pagination(fx).await;
     list_versions(fx).await;
@@ -261,6 +262,24 @@ async fn list_buckets(fx: &Fixture<'_>) {
         "list_buckets: {:?} is not among {:?}",
         fx.bucket,
         buckets.iter().map(|b| &b.name).collect::<Vec<_>>()
+    );
+}
+
+async fn versioning(fx: &Fixture<'_>) {
+    let state = must(
+        "versioning",
+        &format!("versioning({:?})", fx.bucket),
+        fx.port.versioning(&fx.bucket).await,
+    );
+    assert_eq!(
+        state,
+        Versioning::Enabled,
+        "versioning: the fixture bucket keeps versions"
+    );
+    let nope = format!("{}-does-not-exist", fx.bucket);
+    must_be_not_found(
+        &format!("versioning({nope:?})"),
+        fx.port.versioning(&nope).await,
     );
 }
 
