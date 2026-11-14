@@ -122,6 +122,23 @@ pub enum Command {
     /// List, inspect, and delete saved parameter presets
     #[command(subcommand)]
     Presets(PresetsCmd),
+    /// Print a shell completion script
+    Completion {
+        /// Shell to write the script for
+        #[arg(value_enum, value_name = "SHELL")]
+        shell: Shell,
+    },
+}
+
+/// The shells a completion script can be written for.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shell {
+    /// GNU Bash.
+    Bash,
+    /// Z shell.
+    Zsh,
+    /// The fish shell.
+    Fish,
 }
 
 /// `ss-support ops ...`
@@ -207,6 +224,7 @@ impl Cli {
             Some(Command::Presets(PresetsCmd::Delete { .. })) => {
                 "ss-support presets delete".to_owned()
             }
+            Some(Command::Completion { .. }) => "ss-support completion".to_owned(),
         }
     }
 }

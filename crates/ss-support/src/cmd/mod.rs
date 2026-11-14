@@ -9,10 +9,12 @@ use crate::io::Io;
 use crate::run::{App, Failure};
 use crate::tui::{self, RunFlags};
 
+mod completion;
 mod ops;
 mod presets;
 mod run_op;
 
+pub(crate) use completion::run as completion;
 pub(crate) use run_op::elapsed_text;
 
 /// Runs the chosen subcommand. With none, an operator at a terminal gets the
@@ -29,6 +31,7 @@ pub(crate) async fn dispatch(
         Some(Command::Ops(cmd)) => ops::run(cmd, registry, io),
         Some(Command::Presets(cmd)) => presets::run(cmd, &app.presets, io),
         Some(Command::Run(cmd)) => run_op::run(cmd, &cli.global, registry, app, io).await,
+        Some(Command::Completion { shell }) => completion::run(*shell, registry, io),
     }
 }
 

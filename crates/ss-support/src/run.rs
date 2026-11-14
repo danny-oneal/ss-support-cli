@@ -20,7 +20,7 @@ use ss_core::svc::s3::Cached;
 use ss_core::vars::{self, Vars};
 use tokio_util::sync::CancellationToken;
 
-use crate::cli::{Cli, GlobalFlags};
+use crate::cli::{Cli, Command, GlobalFlags};
 use crate::cmd;
 use crate::io::Io;
 use crate::services::{DdbFactory, KubectlFactory, S3Factory, Services};
@@ -270,6 +270,11 @@ async fn pipeline(
     io: &Io,
     cancel: CancellationToken,
 ) -> Result<(), Failure> {
+    // A completion script depends on the command tree alone, so it is
+    // written without reading the config file or anything else.
+    if let Some(Command::Completion { shell }) = &cli.command {
+        return cmd::completion(*shell, &services.registry, io);
+    }
     let app = App::build(
         &cli.global,
         &services.vars,

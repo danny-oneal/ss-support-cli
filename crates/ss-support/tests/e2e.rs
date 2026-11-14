@@ -840,3 +840,212 @@ async fn audit_write_failure_warns_and_keeps_the_exit_code() {
     assert_eq!(err.lines().count(), 1, "{err}");
     assert!(out.contains("Touched"), "{out}");
 }
+
+/// The completion script for `shell`, which must be produced without
+/// anything on stderr.
+async fn completion_script(root: &Path, shell: &str) -> String {
+    let (exit, out, err) = ss(root, &["ss-support", "completion", shell]).await;
+    assert_eq!(exit, Exit::Ok, "{shell}: {err}");
+    assert_eq!(err, "", "{shell}");
+    out
+}
+
+#[tokio::test]
+async fn completion_scripts_name_every_operation_and_flag() {
+    let root = tempfile::tempdir().expect("tempdir");
+    for shell in ["bash", "zsh", "fish"] {
+        let script = completion_script(root.path(), shell).await;
+
+        for op in ss_core::ops::builtin().all() {
+            let id = op.meta().id;
+            assert!(script.contains(id), "{shell}: no {id}");
+        }
+        for word in ["presets", "describe"] {
+            assert!(script.contains(word), "{shell}: no {word}");
+        }
+        for flag in ["bucket", "dry-run", "save-preset"] {
+            // fish names a long flag without its dashes.
+            let want = if shell == "fish" {
+                format!("-l {flag}")
+            } else {
+                format!("--{flag}")
+            };
+            assert!(script.contains(&want), "{shell}: no {want}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn each_completion_script_is_in_its_shell_s_own_form() {
+    let root = tempfile::tempdir().expect("tempdir");
+
+    let bash = completion_script(root.path(), "bash").await;
+    assert!(bash.contains("complete -F _ss__support"), "{bash:.300}");
+    let zsh = completion_script(root.path(), "zsh").await;
+    assert!(zsh.starts_with("#compdef ss-support"), "{zsh:.300}");
+    let fish = completion_script(root.path(), "fish").await;
+    assert!(fish.contains("complete -c ss-support"), "{fish:.300}");
+}
+
+#[test]
+fn an_unknown_shell_is_refused_naming_the_three() {
+    let services = Services::isolated(Path::new("/nonexistent"));
+    let err = ss_support::parse_from(
+        &services.registry,
+        ["ss-support", "completion", "powershell"],
+    )
+    .expect_err("only bash, zsh, and fish are offered");
+
+    let message = err.to_string();
+    for shell in ["bash", "zsh", "fish"] {
+        assert!(message.contains(shell), "{message}");
+    }
+    assert_eq!(err.exit_code(), 2);
+}
+
+#[tokio::test]
+async fn completion_reads_no_config() {
+    let root = tempfile::tempdir().expect("tempdir");
+    write(
+        root.path(),
+        ".config/ss-support/config.yaml",
+        "not: [valid: config",
+    );
+
+    let script = completion_script(root.path(), "bash").await;
+
+    assert!(script.contains("s3.version-diff"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_bash_script_loads_in_bash() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let script = root.path().join("ss-support.bash");
+    fs::write(&script, completion_script(root.path(), "bash").await).expect("write script");
+
+    let out = std::process::Command::new("bash")
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            r#"source "$1" && complete -p ss-support"#,
+            "bash",
+        ])
+        .arg(&script)
+        .output()
+        .expect("run bash");
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("-F _ss__support ss-support"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_zsh_script_loads_in_zsh() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let script = root.path().join("_ss-support");
+    fs::write(&script, completion_script(root.path(), "zsh").await).expect("write script");
+
+    let run = std::process::Command::new("zsh")
+        .args([
+            "-f",
+            "-c",
+            r#"autoload -Uz compinit && compinit -u -D && source "$1" && print -r -- "$_comps[ss-support]""#,
+            "zsh",
+        ])
+        .arg(&script)
+        .env("HOME", root.path())
+        .output();
+    let out = match run {
+        Ok(out) => out,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipping: zsh is not installed");
+            return;
+        }
+        Err(e) => panic!("run zsh: {e}"),
+    };
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "_ss-support",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// What bash offers for the last of `words`, the line being `words`.
+#[cfg(unix)]
+async fn bash_offers(root: &Path, words: &[&str]) -> Vec<String> {
+    let script = root.join("ss-support.bash");
+    fs::write(&script, completion_script(root, "bash").await).expect("write script");
+    let last = words.len() - 1;
+    let prev = if last == 0 { "" } else { words[last - 1] };
+    let program = format!(
+        r#"source "$1" && COMP_WORDS=({line}) && COMP_CWORD={last} && _ss__support ss-support '{cur}' '{prev}' && printf '%s\n' "${{COMPREPLY[@]}}""#,
+        line = words.join(" "),
+        cur = words[last],
+    );
+    let out = std::process::Command::new("bash")
+        .args(["--noprofile", "--norc", "-c", &program, "bash"])
+        .arg(&script)
+        .output()
+        .expect("run bash");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_completes_subcommands_operations_and_their_flags() {
+    let root = tempfile::tempdir().expect("tempdir");
+
+    assert_eq!(
+        bash_offers(root.path(), &["ss-support", "pre"]).await,
+        ["presets"]
+    );
+    assert_eq!(
+        bash_offers(root.path(), &["ss-support", "run", "s3.re"]).await,
+        ["s3.restore-version"]
+    );
+    assert_eq!(
+        bash_offers(root.path(), &["ss-support", "run", "ddb.item-"]).await,
+        ["ddb.item-compare", "ddb.item-edit", "ddb.item-history"]
+    );
+    let flags = bash_offers(
+        root.path(),
+        &["ss-support", "run", "s3.restore-version", "--"],
+    )
+    .await;
+    for want in ["--bucket", "--key", "--version", "--dry-run", "--preset"] {
+        assert!(
+            flags.iter().any(|flag| flag == want),
+            "no {want} in {flags:?}"
+        );
+    }
+    assert_eq!(
+        bash_offers(root.path(), &["ss-support", "presets", "sh"]).await,
+        ["show"]
+    );
+}
