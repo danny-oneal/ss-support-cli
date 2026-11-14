@@ -13,19 +13,23 @@ fn main() {
     println!("cargo:rustc-env=SS_SUPPORT_GIT_DESCRIBE={describe}");
 
     // Run again when the checkout moves to another commit or the tags
-    // change. A path that does not exist would make every build run this
-    // again, so only existing ones are watched.
-    for flag in ["--git-dir", "--git-common-dir"] {
-        let Some(dir) = git(&here, &["rev-parse", flag]) else {
-            continue;
-        };
-        let dir = here.join(dir);
-        for name in ["HEAD", "packed-refs", "refs/tags"] {
-            let path = dir.join(name);
-            if path.exists() {
-                println!("cargo:rerun-if-changed={}", path.display());
-            }
+    // change. `HEAD` only names the branch, so a commit leaves it as it
+    // was: the branch's own file and the log of `HEAD` are what change. A
+    // path that does not exist would make every build run this again, so
+    // only existing ones are watched.
+    let dir_of = |flag: &str| git(&here, &["rev-parse", flag]).map(|dir| here.join(dir));
+    let mut watched = Vec::new();
+    if let Some(dir) = dir_of("--git-dir") {
+        watched.extend(["HEAD", "logs/HEAD"].map(|name| dir.join(name)));
+    }
+    if let Some(dir) = dir_of("--git-common-dir") {
+        watched.extend(["packed-refs", "refs/tags"].map(|name| dir.join(name)));
+        if let Some(branch) = git(&here, &["symbolic-ref", "-q", "HEAD"]) {
+            watched.push(dir.join(branch));
         }
+    }
+    for path in watched.iter().filter(|path| path.exists()) {
+        println!("cargo:rerun-if-changed={}", path.display());
     }
 }
 
