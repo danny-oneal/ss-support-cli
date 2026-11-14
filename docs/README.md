@@ -1,10 +1,13 @@
-# Plans
+# Documents
 
-- `2026-11-07-rust-port-master-plan.md` — the Rust port roadmap. Phase plans
-  for later phases land beside it as `YYYY-MM-DD-rust-phase-N-<topic>.md`.
-- `2026-11-08-rust-phase-2-ops-core-cli.md` — Phase 2: ops core, Runner
-  safety model, headless CLI, then the standalone-repo split (17 tasks).
+- `configuration.md` — reference for `config.yaml` and `presets.yaml`: every
+  key, where the files live, and which flags and variables override them.
+- `config.example.yaml` — a commented config file to copy.
+- `DESIGN.md` — how the program is built and why.
+- `TESTING_PLAN.md` — what is tested, at which layer, and how to run it.
 
-Go is frozen at tag `go-freeze` (2026-11-07). A Go fix landed after that tag
-needs a matching task in the Rust phase backlog so the two implementations
-do not drift before cutover.
+The dated files are the plans the work was done from, kept as the record:
+
+- `2026-11-07-rust-port-master-plan.md` — the roadmap this program was built
+  to; `2026-11-12-finish-roadmap.md` replaced its last three phases.
+- `2026-11-08-…` to `2026-11-13-…` — the task plan of each slice.
