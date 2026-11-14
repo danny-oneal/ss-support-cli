@@ -12,7 +12,7 @@ name = "ss-support"
 path = "src/main.rs"
 
 [dependencies]
-ss-core = { path = "../ss-core", version = "=0.1.0-alpha.7" }
+ss-core = { path = "../ss-core", version = "=0.1.0" }
 anyhow.workspace = true
 async-trait.workspace = true
 aws-config.workspace = true
@@ -22,6 +22,7 @@ aws-sdk-sts.workspace = true
 base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
 ratatui.workspace = true

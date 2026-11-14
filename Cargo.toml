@@ -4,7 +4,7 @@ members = ["crates/ss-core", "crates/ss-support"]
 
 # One version for both crates, released together.
 [workspace.package]
-version = "0.1.0-alpha.7"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -14,12 +14,16 @@ repository = "https://github.com/danny-oneal/ss-support-cli"
 anyhow = "1"
 async-trait = "0.1"
 aws-config = { version = "1.8", features = ["behavior-version-latest"] }
-aws-sdk-dynamodb = "1"
-aws-sdk-s3 = "1.122"
-aws-sdk-sts = "1.97"
+# The SDK crates without their `rustls` feature, which only adds an older
+# HTTP client and TLS stack beside the one `default-https-client` already
+# provides.
+aws-sdk-dynamodb = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-s3 = { version = "1.122", default-features = false, features = ["default-https-client", "rt-tokio", "sigv4a", "http-1x"] }
+aws-sdk-sts = { version = "1.97", default-features = false, features = ["default-https-client", "rt-tokio"] }
 base64 = "0.21"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 # Used through `ratatui::crossterm`; listed only to enable the async event stream.
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = "0.3"

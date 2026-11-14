@@ -1,524 +1,245 @@
-# ss-support-cli — High-Level Design
+# ss-support — Design
 
-Status: **implemented through P6** · Owner: Danny O'Neal · Last updated: 2026-08-01 (rev 3)
-
-> **rev 3** — Roadmap split: P6 is now saved param presets + fuzzy filter (shipped);
-> self-update, goreleaser, and the Homebrew tap move to a new **P7 — Distribution**.
-> Also records an implementation change to §8: class-based confirmation happens at the
-> first mutating step inside the Runner (not pre-run), so the prompt carries a preview of
-> the exact change — e.g. restore shows the diff it is about to apply. The environment
-> allowlist remains a pre-run hard stop.
->
-> **rev 2** — S3/DynamoDB work is composite, not CRUD (e.g. fetch two object versions and
-> diff them). Adds an **Operations layer** (§5), a **JSON diff engine** (§6), and a
-> **View/renderer seam** (§7) so one operation renders to TUI, terminal, and a pasteable
-> report.
-
----
+How the program is built and why. For how to use it, see the README; for
+every configuration key, `configuration.md`.
 
 ## 1. Purpose
 
-A single terminal tool for support engineers to diagnose and remediate **non-production**
-resources. The unit of work is a *support operation* — a named, parameterized diagnostic
-that may touch several AWS services and produce a structured result — not a raw API call.
+One terminal tool for support engineers to diagnose, and in two narrow cases
+repair, **non-production** AWS and Kubernetes resources. The unit of work is
+a *support operation*: a named, parameterised task that may touch several
+services and returns a structured result. It is not a wrapper around single
+API calls.
 
-**Goals**
+Goals:
 
-- One binary; no runtime deps beyond `kubectl` and a configured AWS profile.
-- Complex multi-step operations as first-class, testable, reusable units.
-- Interactive TUI for exploration; the same operations runnable headless in runbooks.
-- Results readable in-terminal *and* exportable for tickets.
-- Guardrails that make production changes structurally impossible.
+- One binary. The only outside programs it needs are `kubectl` and a working
+  AWS profile.
+- Multi-step operations as first-class units that can be tested without a
+  cloud.
+- An interactive front-end for exploring, and the same operations runnable
+  from a script.
+- Results that read well in a terminal and can be pasted into a ticket.
+- Guardrails that make a write outside the listed environments impossible,
+  and a write inside them deliberate.
 
-**Non-goals (v1)**
+Not goals: production access, a general AWS client, or anything that changes
+a Kubernetes cluster.
 
-- Production write access.
-- Replacing Grafana/CloudWatch dashboards.
-- A general-purpose AWS client — if an engineer needs raw `aws s3api`, they should use it.
-
----
-
-## 2. Invocation model
-
-Hybrid: Cobra owns the process, Bubble Tea owns the interactive path. **Operations are the
-command surface** — each registered operation is automatically both a subcommand and a TUI
-menu entry.
+## 2. Two front-ends, one set of operations
 
 ```
-ss                                      # TUI: operation picker
-ss ops list                             # every registered operation
-ss run s3.version-diff \                # headless, same code path
-    --bucket cfg-nonprod --key tenants/acme.json \
-    --a 3HL4kqtJ... --b null            # "null" = current version
-ss run s3.version-diff ... -o json      # machine-readable delta
-ss run s3.version-diff ... --export d.md
-ss run record.trace --tenant acme       # cross-service op (DDB → S3)
+ss-support run <operation> --flag value …      command line, for scripts
+ss-support                                     TUI, when stdin and stdout are terminals
 ```
 
-Persistent flags: `--profile`, `--region`, `--env`, `--context`, `-o/--output`,
-`--export`, `--dry-run`, `--yes`, `--verbose`.
+Both build the same `Runner` around the same `Operation`, so the environment
+allowlist, the confirmation, `--dry-run`, and the audit log behave the same
+way in both. They differ in one deliberate place: `--yes` can confirm a
+mutating operation on the command line, and never in the TUI, where the
+operator is present and is always asked.
 
-Precedence: **flag > env (`SS_*`) > `~/.config/ss/config.yaml` > default**.
+`ss-support ops list|describe`, `presets list|show|delete`, and `completion
+<shell>` are the fixed subcommands beside `run`.
 
-Cobra flags and TUI form fields are both **generated from the operation's declared
-params** (§5.2). One definition, two front-ends, plus shell completion for free.
-
----
-
-## 3. Architecture
-
-```
-      ┌──────────────┐              ┌──────────────┐
-      │ cmd/ (Cobra) │              │ tui/ (Charm) │        front-ends
-      └──────┬───────┘              └──────┬───────┘
-             └───────────┬─────────────────┘
-                  ┌──────▼───────┐
-                  │  ops.Registry│                          application layer
-                  │  Operation   │   ← the interesting code lives here
-                  └──────┬───────┘
-          ┌──────────────┼──────────────┬──────────────┐
-     ┌────▼────┐   ┌─────▼────┐   ┌─────▼────┐   ┌─────▼────┐
-     │  diff   │   │ jsonutil │   │  report  │   │  render  │  domain services
-     └─────────┘   └──────────┘   └──────────┘   └──────────┘
-                  ┌──────▼───────┐
-                  │ Deps (ports) │                          infrastructure
-                  └──────┬───────┘
-      ┌───────┬──────────┼─────────┬─────────┐
-   ┌──▼───┐ ┌─▼────┐ ┌───▼────┐ ┌──▼───┐ ┌───▼───┐
-   │s3svc │ │ddbsvc│ │kubectl │ │guard │ │ audit │
-   └──┬───┘ └─┬────┘ └───┬────┘ └──────┘ └───────┘
-   AWS SDK  AWS SDK  exec kubectl
-```
-
-The key change from rev 1: **front-ends no longer call resource ports.** They select an
-operation, collect params, run it, and render its result. Ports are an implementation
-detail of operations.
-
-### Package layout
+## 3. Crates and layers
 
 ```
-ss-support-cli/
-├── main.go                   # cmd.Execute()
-├── cmd/
-│   ├── root.go               # persistent flags, Deps + Registry construction
-│   ├── run.go                # `ss run <op>` — flags generated from op params
-│   ├── ops.go                # `ss ops list|describe`
-│   └── tui.go
-├── internal/
-│   ├── ops/                  # ★ application layer
-│   │   ├── operation.go      # Operation, Meta, Param, Input, Result
-│   │   ├── view.go           # View union: Diff, Table, Doc, Summary, Tree
-│   │   ├── registry.go       # ID → Operation, categories, lookup
-│   │   ├── runner.go         # Step(), progress emit, timing, audit, guard
-│   │   ├── s3ops/            # version-diff, object-inspect, prefix-audit
-│   │   ├── ddbops/           # item-history, gsi-consistency, item-compare
-│   │   └── flowops/          # ★ cross-service: record.trace, config.drift
-│   ├── diff/                 # ★ semantic JSON diff engine
-│   │   ├── json.go  path.go  opts.go  stats.go
-│   ├── jsonutil/             # tolerant parse, canonicalize, redact, DDB AV → JSON
-│   ├── report/               # Result → markdown / HTML / patch
-│   ├── render/               # Result → terminal table / JSON (headless)
-│   ├── config/  awsx/  guard/  audit/
-│   ├── s3svc/                # port.go + aws.go + fake.go   (version-aware)
-│   ├── ddbsvc/               # port.go + aws.go + fake.go
-│   ├── kubectl/              # port.go + exec.go + fake.go
-│   └── tui/
-│       ├── app.go  screen.go  msgs.go
-│       ├── keys/  theme/
-│       ├── components/       # statusbar, confirm, spinner, errorpanel,
-│       │                     #   diffviewer ★, jsontree, progresslist
-│       └── screens/          # opspicker, opsform, opsresult, s3browse, k8spods, logstail
-└── docs/DESIGN.md
+crates/ss-core      everything testable without a terminal or a cloud
+  diff/             the comparison engine
+  ops/              Operation, Param, Input, View, Registry, Runner, the operations
+  svc/              ports: S3, DynamoDB, kubectl; fakes; contract suites; decorators
+  config/ guard audit cache preset vars render report jsonutil fuzzy
+
+crates/ss-support   the binary
+  cli/ cmd/ run     clap tree, subcommands, exit codes, signals
+  aws/ kubectl      adapters that implement the ports
+  confirm io        the command-line confirmation and injectable stdio
+  tui/              shell, screens, components
 ```
 
-### Dependencies
+`ss-core` has no AWS dependency. The binary's `main.rs` only parses and
+calls into the library, so tests drive the whole program in-process.
 
-```
-charm.land/bubbles/v2         charm.land/lipgloss/v2       spf13/cobra
-github.com/aws/aws-sdk-go-v2  (config, service/s3, service/dynamodb,
-                               feature/dynamodbav, credentials/stscreds)
-golang.org/x/sync/errgroup    # parallel fetches inside an operation
-```
+Dependencies point one way: operations depend on ports, adapters implement
+ports, front-ends depend on operations. Nothing in `ss-core` reads the
+process environment; it reads a `Vars` snapshot that tests replace.
 
-Diff is hand-rolled (§6) — the JSON structural diff is ~300 lines and the domain-specific
-ignore/array-key rules are the whole value; a library would fight you on those.
+## 4. Ports and adapters
 
----
+Each outside system is a trait in `ss-core/src/svc`:
 
-## 4. Resource ports (infrastructure)
-
-Narrow, consumer-owned interfaces returning **our** types, never SDK types.
-
-```go
-// internal/s3svc/port.go — version-aware, because that's the point
-type Port interface {
-    ListBuckets(ctx context.Context) ([]Bucket, error)
-    List(ctx context.Context, bucket, prefix string, tok Token) (Page, error)
-    ListVersions(ctx context.Context, bucket, key string) ([]Version, error)
-    GetVersion(ctx context.Context, bucket, key, versionID string) (Object, error)
-    Head(ctx context.Context, bucket, key string) (ObjectMeta, error)
-}
-
-type Version struct {
-    ID        string    // "" or "null" = current
-    Modified  time.Time
-    Size      int64
-    ETag      string
-    IsLatest  bool
-    IsDelete  bool      // delete markers show up in history
-}
-```
-
-```go
-// internal/ddbsvc/port.go
-type Port interface {
-    ListTables(ctx context.Context) ([]string, error)
-    DescribeTable(ctx context.Context, table string) (TableInfo, error)  // key schema, GSIs
-    GetItem(ctx context.Context, table string, key Key) (Item, error)
-    Query(ctx context.Context, q QuerySpec) (ItemPage, error)
-    QueryIndex(ctx context.Context, table, index string, q QuerySpec) (ItemPage, error)
-}
-```
-
-`Item` is `map[string]any` already unmarshalled out of AttributeValue by `jsonutil` — so
-DynamoDB items and S3 JSON objects hit the diff engine as the same shape. That symmetry is
-what makes cross-service comparison cheap.
-
-`Deps` is built once in `PersistentPreRunE` and injected into every operation:
-
-```go
-type Deps struct {
-    S3    s3svc.Port
-    DDB   ddbsvc.Port
-    K8s   kubectl.Port
-    Cache cache.Store        // content-addressed; see §6.4
-    Env   config.Environment
-}
-```
-
----
-
-## 5. The Operations layer ★
-
-### 5.1 Interface
-
-```go
-// internal/ops/operation.go
-type Operation interface {
-    Meta() Meta
-    Params() []Param
-    Run(ctx context.Context, r *Runner, in Input) (Result, error)
-}
-
-type Meta struct {
-    ID       string       // "s3.version-diff"  — stable, used in CLI + audit log
-    Name     string       // "Compare object versions"
-    Summary  string       // one line, shown in picker
-    Category string       // "S3" | "DynamoDB" | "Cross-service" | "Kubernetes"
-    Class    guard.Class  // Read | Mutate | Destructive
-}
-```
-
-Operations are registered at init:
-
-```go
-func init() { ops.Register(s3ops.VersionDiff{}) }
-```
-
-### 5.2 Params drive both front-ends
-
-```go
-type Param struct {
-    Name     string
-    Label    string
-    Type     ParamType    // String, Int, Bool, Enum, Duration, JSON
-    Required bool
-    Default  string
-    Help     string
-    // Suggest powers: TUI picker list, Cobra shell completion, and `ops describe`.
-    // Later params can depend on earlier ones (bucket → key → versionID).
-    Suggest  func(ctx context.Context, d Deps, in Input) ([]Choice, error)
-}
-```
-
-This is the highest-leverage piece of the design. `s3.version-diff` declares:
-
-```go
-func (VersionDiff) Params() []Param {
-    return []Param{
-        {Name: "bucket", Required: true, Suggest: suggestBuckets},
-        {Name: "key",    Required: true, Suggest: suggestKeys},      // depends on bucket
-        {Name: "a",      Label: "Version A", Suggest: suggestVersions}, // depends on key
-        {Name: "b",      Label: "Version B", Default: "null", Suggest: suggestVersions},
-        {Name: "ignore", Label: "Ignore paths", Type: JSON, Help: "glob list"},
-    }
-}
-```
-
-…and gets, with no extra code: a Cobra flag set, `ss run` shell completion, and a TUI form
-where "Version A" is an interactive list of that key's actual versions with timestamps.
-Nobody copies a version ID by hand.
-
-### 5.3 Runner — steps, progress, guard, audit
-
-```go
-func (o VersionDiff) Run(ctx context.Context, r *ops.Runner, in ops.Input) (ops.Result, error) {
-    bucket, key := in.Str("bucket"), in.Str("key")
-
-    var a, b s3svc.Object
-    err := r.Step("fetch both versions", func(ctx context.Context) error {
-        g, gctx := errgroup.WithContext(ctx)
-        g.Go(func() (err error) { a, err = r.S3.GetVersion(gctx, bucket, key, in.Str("a")); return })
-        g.Go(func() (err error) { b, err = r.S3.GetVersion(gctx, bucket, key, in.Str("b")); return })
-        return g.Wait()
-    })
-    if err != nil { return ops.Result{}, err }
-
-    left,  err := jsonutil.Parse(a.Body);  if err != nil { return ops.Result{}, err }
-    right, err := jsonutil.Parse(b.Body);  if err != nil { return ops.Result{}, err }
-
-    delta := diff.JSON(left, right, diff.Opts{
-        Ignore:     in.Globs("ignore"),
-        ArrayMatch: map[string]string{"$.rules[*]": "id"},
-    })
-
-    return ops.Result{Views: []ops.View{
-        ops.SummaryView{Fields: []ops.KV{
-            {"Object", bucket + "/" + key},
-            {"A", a.VersionLabel()}, {"B", b.VersionLabel()},
-            {"Changes", delta.Stats.String()},
-        }},
-        ops.DiffView{Left: a.VersionLabel(), Right: b.VersionLabel(), Delta: delta},
-    }}, nil
-}
-```
-
-`Runner.Step` is a thin template: emits a progress message, times the step, wraps any
-error with the step name (`fetch both versions: AccessDenied`), and enforces
-context cancellation. Operations stay linear and readable; the cross-cutting concerns live
-in one place.
-
-`Runner` also holds the guard and audit hooks — `Class: Mutate` operations can't reach
-`Run` without passing `guard`, and every non-`Read` run is written to the audit log with
-its resolved params.
-
-### 5.4 Cross-service operations
-
-`flowops` is where the real support value is. Example, `record.trace`:
-
-1. `ddb.GetItem` on the tenant record → yields `configS3Key` and `activeVersion`.
-2. `s3.ListVersions` on that key → resolve the previous version.
-3. Fetch both, diff.
-4. Optionally `kubectl get configmap` and diff *that* against the S3 config to catch drift.
-
-It's still one `Operation` with one `Result`. The front-ends don't know or care that four
-services were involved.
-
-### 5.5 Progress → TUI
-
-`Run` executes in a goroutine. `Runner` emits `Progress` on a channel; a self-rescheduling
-`tea.Cmd` pumps it into `ProgressMsg`, so a multi-step operation renders as a live
-checklist instead of an opaque spinner. Terminating message is `ResultMsg` or `ErrMsg`.
-
-**No operation ever runs inside `Update`.**
-
----
-
-## 6. Diff engine ★
-
-### 6.1 Model
-
-```go
-// internal/diff/
-type Delta struct {
-    Changes []Change   // sorted by path
-    Stats   Stats      // Added, Removed, Changed, TypeChanged counts
-}
-
-type Change struct {
-    Path     Path       // typed segments, NOT a string
-    Kind     Kind       // Added | Removed | Changed | TypeChanged
-    Old, New any
-}
-
-type Path []Segment    // Segment = Key(string) | Index(int) | MatchKey(field, value)
-```
-
-Path as **typed segments** rather than `"a.b[0].c"` is deliberate: it lets the TUI collapse
-by subtree, lets ignore-rules match structurally, and lets the exporter render either
-dotted notation or JSONPath from the same value.
-
-### 6.2 Options — the part that makes it usable
-
-```go
-type Opts struct {
-    Ignore     []PathGlob         // "**.updatedAt", "$.metadata.revision", "**.etag"
-    ArrayMatch map[string]string  // path glob → identity field, e.g. "$.rules[*]": "id"
-    Tolerance  float64            // float comparison epsilon
-    TreatNullAsAbsent bool
-}
-```
-
-Two rules carry almost all the weight:
-
-- **Ignore globs.** Timestamps, revision counters, and checksums change on every write.
-  Without suppression every diff is 100% noise. Defaults live in `config.yaml` per
-  environment; operations add their own; `--ignore` appends at runtime.
-- **Array matching by key.** Comparing arrays by index means inserting one element at
-  position 0 marks every subsequent element as changed. Matching `$.rules[*]` by its `id`
-  field turns that into a single `Added`. This is the difference between a diff engine
-  people trust and one they ignore.
-
-### 6.3 Algorithm
-
-Recursive structural walk over parsed `any` trees. Objects: key set union, recurse on
-intersection. Arrays: keyed matching when configured, otherwise LCS over element hashes so
-pure insertions/deletions stay clean. Scalars: typed compare, with `TypeChanged` reported
-separately from `Changed` — `"5"` → `5` is a schema bug, not a value edit, and support
-engineers need to see the difference.
-
-For non-JSON or unparseable bodies, fall back to a line-based unified diff so the operation
-degrades instead of erroring.
-
-### 6.4 Caching
-
-S3 object versions are immutable, so fetched bodies are cached content-addressed by
-`(bucket, key, versionID)` under `~/.cache/ss/`. Comparing A→B then B→C halves the
-fetches, and re-running after tweaking `--ignore` is instant. `--no-cache` bypasses.
-
----
-
-## 7. Views and renderers ★
-
-One operation, three outputs. `Result.Views` is an ordered union:
-
-```go
-type View interface{ isView() }
-
-type SummaryView struct { Fields []KV }
-type DiffView    struct { Left, Right string; Delta diff.Delta }
-type TableView   struct { Cols []string; Rows [][]string }
-type DocView     struct { Title, Body, Lang string }
-type TreeView    struct { Root Node }
-```
-
-Three renderers **visit** the same views:
-
-| Renderer | Target | Notes |
+| Port | Reads | Writes |
 |---|---|---|
-| `tui/screens/opsresult` | interactive | `diffviewer` component: unified/side-by-side toggle, `n`/`p` hunk nav, `c` collapse unchanged, `/` filter by path |
-| `render` | stdout | table or `-o json` (the `Delta` marshals directly) |
-| `report` | file / clipboard | markdown with fenced diff blocks, or HTML; `--export d.md`, or `e` in the TUI |
+| `S3Port` | buckets, listings, version history, a version's body, metadata, whether the bucket keeps versions | `copy_version`: a server-side copy of one version onto its key |
+| `DdbPort` | tables, table description, an item, key-condition queries on a table or index | `update_item`: set and remove attributes of one item under a condition |
+| `KubectlPort` | one resource as JSON, a listing as JSON, a pod's log as a stream | none, by design |
 
-Adding a new operation requires zero renderer changes as long as it composes existing view
-types. That's the constraint that keeps this from sprawling.
+Around each port:
 
----
+- a **fake** (`FakeS3`, `FakeDdb`, `FakeKubectl`) that keeps data in memory;
+- an **adapter** in the binary (`aws/s3.rs`, `aws/ddb.rs`, `kubectl.rs`);
+- for S3 and DynamoDB, a **contract suite**: a set of assertions any
+  implementation must pass, run against the fake in unit tests and against
+  MinIO and dynalite in CI;
+- for S3 and DynamoDB, **decorators**: `Lazy` builds the adapter (and
+  resolves credentials) only when an operation first needs it, and `Cached`
+  keeps fetched S3 versions on disk, since a version id always names the
+  same content.
 
-## 8. AWS auth · Kubernetes · Safety
+The kubectl adapter runs the `kubectl` binary, always with an explicit
+context, and only ever `get` and `logs`. Every child process is tracked, and
+every path that ends the program stops the ones still running.
 
-**AWS** — SSO / IAM Identity Center plus named-profile assume-role chains. `awsx` calls
-`config.LoadDefaultConfig(ctx, WithSharedConfigProfile, WithRegion)`; the SDK already
-resolves `sso_session` and `role_arn` chaining. The adapter's real job is failing well: on
-startup `sts:GetCallerIdentity`, and on an expired-token error show *"SSO session expired —
-run `aws sso login --profile foo`"* with an offer to shell out and do it. Resolved account
-ID feeds the guardrail and the status bar (`profile · account · region · cluster`, always
-visible).
+A port error is `SvcError`: `NotFound`, `Changed` (what a write was based on
+is no longer true), or anything else kept whole.
 
-**Kubernetes** — shell out to `kubectl` with the user's kubeconfig, always `-o json`,
-unmarshalled into minimal structs. Streaming ops (`logs -f`) get a `Stream()` returning a
-channel. Behind `kubectl.Port`, so a `client-go` implementation can replace it later.
+## 5. Operations
 
-**Safety**, all in `internal/guard`:
+An `Operation` declares what it is and what it takes, and implements one
+method:
 
-1. **Environment allowlist** — `config.yaml` enumerates permitted environments with account
-   IDs and kube contexts. Resolved account ID + current kube context are checked at startup
-   and again before any `Mutate`/`Destructive` operation. Mismatch is a hard stop with no
-   override flag. This is the load-bearing control.
-2. **Operation class** — declared in `Meta`. `Mutate` needs `y/n`; `Destructive` needs the
-   resource name typed. `--yes` covers `Mutate` only, never `Destructive`.
-3. **Audit log** — JSONL to `~/.local/state/ss/audit.log`: timestamp, user, env, account,
-   operation ID, resolved params, outcome, duration. Written for every non-`Read` run.
+```rust
+fn meta(&self) -> Meta;              // id, name, summary, category, class
+fn params(&self) -> Vec<Param>;      // name, label, type, default, help, suggestions
+async fn run(&self, r: &mut Runner, input: &Input) -> anyhow::Result<OpResult>;
+```
 
-`--dry-run` short-circuits in `Runner` before the first mutating step.
+- **Registration is explicit**: `ops::builtin()` lists every operation.
+- **Params drive both front-ends.** The command line generates one `run
+  <id>` subcommand per operation with one flag per param; the TUI builds a
+  form from the same list. Defaults and required params are enforced by the
+  runner, after a preset has been merged, not by the argument parser.
+- **`Input` is a lenient string map**, which is what a command line, a form,
+  and a presets file can all produce.
+- **Suggestions** are functions from the dependencies and the input so far
+  to a list of choices, which lets a form offer buckets, then keys under the
+  typed prefix, then that key's versions.
 
----
+The operations, by what they are for:
 
-## 9. Design patterns used
-
-- **Elm Architecture (Model-View-Update)** — Bubble Tea; state changes pure, effects are
-  `tea.Cmd`.
-- **Command / Use-Case object** — `Operation` is the application layer's command object:
-  named, parameterized, independently testable, front-end agnostic. The single most
-  important decision in rev 2.
-- **Registry** — `ops.Register` at init; front-ends discover operations rather than
-  hardcoding menus or subcommands.
-- **Ports & Adapters (Hexagonal)** — `s3svc.Port` etc.; fakes let every operation be
-  unit-tested with zero AWS calls.
-- **Visitor** — three renderers over the `View` union; new outputs don't touch operations.
-- **Template Method** — `Runner.Step` supplies timing, progress, error wrapping, and
-  cancellation around each caller-supplied step.
-- **Strategy** — diff array-matching (index / keyed / LCS); `kubectl` exec vs `client-go`.
-- **Specification** — `diff.PathGlob` ignore rules as composable, configurable predicates.
-- **Decorator / Middleware** — `guard` and `audit` wrap operation execution in `Runner`
-  rather than each operation remembering to check.
-- **Facade** — service layer collapses SDK paginators into `List(...) Page`.
-- **Composite + Delegation** — TUI screen stack; also `Path`/`TreeView` are composites.
-- **Flyweight / memoization** — content-addressed version cache.
-- **Factory + functional options** — `awsx.NewConfig`, `s3svc.New(cfg, WithTimeout(...))`.
-- **Null Object** — `audit.Nop`, `guard.AllowAll`, `cache.Nop` for tests.
-
----
-
-## 10. Phased roadmap
-
-| Phase | Scope | Exit criteria |
+| Id | Class | Does |
 |---|---|---|
-| **P0 — Foundation** | Cobra root, `config`, `Deps`, `awsx` w/ SSO expiry handling, `ops` interfaces + registry + `Runner`, TUI shell (screen stack, theme, status bar, help, error panel, confirm), `opspicker`/`opsform`/`opsresult` driven by a fake operation, `guard` + `audit` | A fake op appears in `ss ops list` **and** the TUI picker, prompts for params, renders a Summary + Table view. No AWS involved. |
-| **P1 — Diff engine** | `diff` (walk, ignore globs, keyed arrays, LCS, stats), `jsonutil`, `diffviewer` component, `report` markdown export | Golden-file tests over fixture JSON pairs pass; `DiffView` renders and exports |
-| **P2 — S3 ops** | version-aware `s3svc`, version cache, `s3.version-diff`, `s3.object-inspect`, `s3.prefix-audit`, `s3browse` | Diff two real versions end-to-end in TUI and headless; export to markdown |
-| **P3 — DynamoDB ops** | `ddbsvc` + AttributeValue→JSON, `ddb.item-compare`, `ddb.item-history`, `ddb.gsi-consistency` | Compare two items / an item across GSI and base table using the same diff engine |
-| **P4 — Cross-service** | `flowops`: `record.trace`, `config.drift`; `kubectl` adapter, `k8spods`, `logstail` | One operation spans DDB → S3 → kubectl and returns a single coherent result |
-| **P5 — Remediation** | Guarded mutations: restore prior S3 version, edit DDB item, restart/scale deployment | Every mutation confirmed, audited, blocked outside allowlist; restore reuses the diff as its confirmation preview |
-| **P6 — Ergonomics** | Saved param presets (`--preset`/`--save-preset`, `ss presets`, ctrl+p/ctrl+s in the TUI), fuzzy filter in picker and suggestion lists | A saved param set replays by name in both front-ends; "vdiff" finds `s3.version-diff` |
-| **P7 — Distribution** | `--version`/self-update, goreleaser + Homebrew tap | Onboarding is `brew install` |
+| `s3.version-diff` | read | compares two versions of one object |
+| `s3.object-inspect` | read | metadata, history, and a preview of one object |
+| `s3.prefix-audit` | read | counts, sizes, and ages under a prefix |
+| `s3.restore-version` | mutate | makes an earlier version current again |
+| `ddb.item-compare` | read | compares two items |
+| `ddb.item-history` | read | lists an item's versions and compares two |
+| `ddb.gsi-consistency` | read | compares an item with its projection in an index |
+| `ddb.item-edit` | destructive | sets and removes attributes of one item |
+| `record.trace` | read | follows a record from DynamoDB to the object it names |
+| `config.drift` | read | compares an S3 config object with a live ConfigMap |
+| `demo.hello`, `demo.json-diff` | read | exercise the pipeline without a cloud |
 
-P0 and P1 are the spine and should land together-ish — P1 is pure logic with no I/O, so it
-can be built in parallel with P0 by anyone. P2–P4 are independent verticals afterward.
+## 6. The runner is the safety model
 
----
+Every run goes through `Runner::execute`:
 
-## 11. Alternatives considered
+1. Fill defaults; a missing required param is a usage error.
+2. Ask the **guard**. An operation that is not a read runs only in an
+   environment listed in the config file. Nothing overrides this: there is
+   no flag, and it is checked before the operation runs, so neither service
+   is reached.
+3. Run the operation. It does its work through two calls:
+   - `r.step(name, …)` for reads: progress, timing, cancellation, and the
+     step's name on any error.
+   - `r.mutate(name, …)` for the change. A read-class operation that calls
+     it is stopped. A dry run stops here. Otherwise the first `mutate` of a
+     run asks for confirmation, showing whatever the operation registered
+     with `r.preview(…)`.
+4. Record one **audit** entry for every run that is not a read and got past
+   step 1: who, where, what, with which params, the outcome, and how long it
+   took.
 
-Named only — ask if you want any expanded:
+Confirmation depends on the operation's class:
 
-- **Declarative YAML operations** (steps + renderer in config, no rebuild to add an op).
-  Rejected for v1: you end up writing an interpreter and lose type safety. The `Operation`
-  interface is shaped so a YAML-backed implementation can be added later without reshaping
-  callers.
-- Off-the-shelf diff libraries (`go-cmp` for structural, `sergi/go-diff` for text) instead
-  of hand-rolling.
-- JSON Patch (RFC 6902) as the wire format for `Delta` instead of a custom type.
-- `client-go` instead of shelling out to `kubectl`.
-- `huh` forms for the param form instead of hand-rolled `textinput` groups.
-- Wish (SSH-served TUI) for centralized, credential-free access.
-- A thin backend service holding the credentials, CLI as client — moves guardrails
-  server-side where local config edits can't bypass them.
-- Plugin architecture (`ss-<verb>` sub-binaries, kubectl-style) instead of one monolith.
+| Class | Command line | TUI |
+|---|---|---|
+| read | never asked | never asked |
+| mutate | `y`, or `--yes` | `y` and enter |
+| destructive | the resource name typed back; `--yes` does not count | the resource name and enter |
 
----
+The question is asked in the middle of the run, not before it, so that what
+it shows is real: the diff between what is stored and what will be stored.
 
-## 12. Open questions
+**Writes are made only on what was shown.** The restore reads the history
+again after the answer and stops if the current version has changed; it runs
+only where the bucket has versioning enabled, because elsewhere the copy
+could overwrite content for good. The item edit is conditional in DynamoDB
+on the stored values of the attributes it touches. Either refuses with
+`changed since it was read`.
 
-1. **What are the top 5 real support operations?** The registry design pays off only if the
-   op list is concrete. Naming them shapes `flowops` and the default ignore rules.
-2. Which JSON fields are pure noise (timestamps, revisions, checksums)? These become the
-   shipped default `Ignore` globs — and getting them right is most of whether engineers
-   trust the diff.
-3. Which arrays need identity-keyed matching, and what's the identity field for each?
-4. Do S3 buckets have versioning enabled in every non-prod environment? If not,
-   `s3.version-diff` needs a fallback (backup prefix convention? DDB-recorded history?).
-5. Are DynamoDB tables discoverable via `ListTables`, or is there a curated set?
-6. Do objects/items ever contain PII that must be redacted before export? `jsonutil.Redact`
-   is stubbed for this but needs a field list.
-7. Audit log local-only, or shipped to CloudWatch/Splunk?
+**A write's preview hides nothing.** The ignore paths and keyed array
+matching that make read comparisons quiet are not applied to it.
+
+Exit codes: `0` ok (a dry run included), `1` failed, denied, or declined,
+`2` the input must be fixed, `130` interrupted.
+
+## 7. The diff engine
+
+`ss-core/src/diff` compares two JSON values semantically:
+
+- **Typed paths** (`rules[2].limit`), and **ignore globs** over them
+  (`**.updatedAt`).
+- **Arrays** are aligned by a named identity field where the config says so
+  (`$.rules[*]: id`), so that one insertion is one change, and by longest
+  common subsequence otherwise.
+- **Numbers** are compared as doubles, with an optional tolerance, and
+  printed the same way everywhere. Null can be treated as absent.
+- Bodies that are not both JSON fall back to a **line diff**.
+
+JSON object keys are kept sorted, which is what makes the canonical form
+canonical. The engine's output for a set of fixture pairs is pinned in
+`crates/ss-core/tests/fixtures/diff/`.
+
+## 8. Views and renderers
+
+An operation returns `View`s, a closed set: `Summary` (fields), `Diff`,
+`Table`, `Doc` (text with a language), and `Tree`. Because the set is
+closed, adding a variant is a compile error in every renderer until it is
+handled. Three renderers consume it: plain text, `-o json`
+(`{"views":[…]}`), and the markdown report that `--export` and the TUI's `e`
+write.
+
+## 9. The TUI
+
+`ratatui` on `crossterm`. `tui/shell.rs` owns a stack of screens and one
+event loop.
+
+- A screen is a small state machine: `init`, `update(msg) -> Vec<Cmd>`,
+  `view`. **`update` never calls a service.** It returns commands (`Push`,
+  `Pop`, `Replace`, `Task`, `Run`, `Stream`, …); the shell spawns the work
+  and routes the result back to the screen that asked, or drops it if that
+  screen has gone. Loads and streams end with their screen.
+- Runs go through `tui/bridge.rs`, which builds the same runner as the
+  command line; progress and the confirmation question arrive as messages.
+- **Input already on its way never answers something new.** A confirmation
+  is a typed answer and enter; keys are dropped for a moment after a
+  question or a result appears; terminal events are handled before
+  background results; a paste is only ever text for a focused field.
+- **Streams** (a followed log) are read one batch at a time, and a screen
+  that shows one keeps a buffer bounded in lines and in bytes. A screen that
+  is only receiving lines is redrawn at most ten times a second.
+- Text from outside is cleaned before it is drawn: tabs expanded, control
+  characters dropped, colour codes stripped.
+- The terminal is restored on every way out, including a panic and a second
+  signal.
+
+Screens: the operation picker, the form, the run with its confirmation, the
+result (one view at a time, with a diff viewer), the S3 browser, the pod
+list, and the log tail.
+
+## 10. What is deliberately absent
+
+- **No production access.** The allowlist is the only gate, and it is not a
+  list of things to avoid but of places where writing is possible at all.
+- **No Kubernetes writes.** A test fails if the port gains a write method or
+  the adapter names a write verb.
+- **No general write API.** Each port has exactly one write, shaped so the
+  service does the careful part, and a test pins the list of operations
+  that are not reads.
+- **No plug-in or auto-registration mechanism.** The registry is one
+  function that can be read top to bottom.
+- **No release pipeline.** The program is installed from a checkout with
+  `cargo install`.

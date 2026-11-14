@@ -1,22 +1,67 @@
 # ss-support
 
-Support operations CLI for non-production AWS and Kubernetes resources,
-ported from an earlier implementation.
+Support operations for non-production AWS and Kubernetes resources: compare
+and inspect S3 objects and DynamoDB items, follow a record to its
+configuration, read pods and their logs, and, in listed environments only,
+restore an object version or edit an item. Every operation runs from the
+command line (`ss-support run`) and from an interactive TUI (`ss-support`).
 
-## Build
+## Install
+
+From a checkout, with a Rust toolchain (1.88 or newer):
+
+```bash
+cargo install --path crates/ss-support --locked    # puts ss-support in ~/.cargo/bin
+ss-support --version
+```
+
+`--version` shows the package version. A build that is not exactly at the
+tag of that version also shows what git says about it, as in `ss-support
+0.1.0 (0.1.0-3-gabc1234)`.
+
+The Kubernetes screens, `config.drift`, and `record.trace --configmap` need
+`kubectl` on `PATH`; the AWS operations need a working AWS profile. Most
+operations need no config file. `record.trace` needs its `trace.domains`, and
+writing needs the environment listed: see [Writes](#writes) and
+`docs/configuration.md`.
+
+### Shell completion
+
+```bash
+# bash, with the bash-completion package, which loads the file when needed
+mkdir -p ~/.local/share/bash-completion/completions
+ss-support completion bash > ~/.local/share/bash-completion/completions/ss-support
+
+# zsh: any directory on $fpath; ~/.zshrc must add it before compinit runs:
+#   fpath=(~/.zfunc $fpath); autoload -Uz compinit && compinit
+mkdir -p ~/.zfunc
+ss-support completion zsh > ~/.zfunc/_ss-support
+
+# fish
+mkdir -p ~/.config/fish/completions
+ss-support completion fish > ~/.config/fish/completions/ss-support.fish
+```
+
+Without the bash-completion package, put `source <(ss-support completion
+bash)` in `~/.bashrc` instead.
+
+Subcommands, operation ids, and flags are completed. Values, such as bucket
+or table names, are not. Write the script again after upgrading, since it
+lists the operations of the version that wrote it.
+
+## Development
 
 ```bash
 make check                          # fmt + clippy (-D warnings) + tests
+make msrv                           # type-check on the minimum supported Rust
 cargo build --release               # target/release/ss-support
-cargo install --path crates/ss-support      # install ss-support into ~/.cargo/bin
-cargo run -p ss-support -- --version
 ```
 
 Crates: `crates/ss-core` (diff engine, operations layer, ports; no AWS
-dependencies) and `crates/ss-support` (the binary: CLI, AWS adapters, and the
-kubectl adapter).
-`make help` lists every target; `docs/` holds the design notes, testing
-plan, and an example config.
+dependencies) and `crates/ss-support` (the binary: CLI, TUI, AWS adapters,
+and the kubectl adapter). `make help` lists every target. `docs/` holds the
+configuration reference, the design, the testing plan, and an example
+config.
 
 ## CLI
 
@@ -25,6 +70,7 @@ ss-support ops list                                   # every operation
 ss-support ops describe demo.json-diff                # its params, defaults, help
 ss-support run demo.json-diff --left a.json --right b.json -o json
 ss-support presets list                               # saved parameter sets
+ss-support completion bash                            # a completion script
 ```
 
 Global flags work before or after the subcommand.
@@ -81,12 +127,12 @@ either: results are shown on screen and exported with `e`.
 |---|---|
 | Operations | `↑` `↓` move · `enter` open · `/` filter by name (then `↑` `↓`, `enter`, `esc` to clear) · `b` browse S3 · `p` pods · `q` quit |
 | Form | `tab` `shift+tab` `↑` `↓` move between params · `↓` into the suggestions, `enter` to take one · `enter` run · `ctrl+p` load a preset · `ctrl+s` save a preset · `esc` back |
-| Run | `ctrl+c` or `esc` cancel · `esc` back once it has ended |
+| Run | `ctrl+c` or `esc` cancel · `esc` or `enter` back once it has ended |
 | Confirm | type `y` (or `n`) and `enter` for a mutating operation · type the resource name and `enter` for a destructive one · `↑` `↓` `pgup` `pgdn` scroll the preview · `esc` decline |
 | Result | `tab` `shift+tab` next/previous view · `↑` `↓` `←` `→` `pgup` `pgdn` `g` scroll · `e` export a markdown report · `ctrl+s` save a preset · `esc` back |
-| Diff view | `n` `p` next/previous change · `pgup` `pgdn` ten changes · `g` first change · `s` unified or side-by-side · `c` one line per change · `/` filter by path |
-| S3 browser | `↑` `↓` move · `enter` open a bucket, prefix, or an object's versions · `space` mark a version · `d` compare the two marked versions · `R` restore the selected version (opens `s3.restore-version`) · `r` reload · `esc` up |
-| Pods | `↑` `↓` move · `enter` open the pod's log · `n` another namespace (empty for the context's default) · `r` reload · `esc` back |
+| Diff view | `n` `p` (or `↓` `↑`) next/previous change · `pgup` `pgdn` ten changes · `g` first change · `s` unified or side-by-side · `c` one line per change · `/` filter by path |
+| S3 browser | `↑` `↓` (or `k` `j`) move · `pgup` `pgdn` a page · `g` or `home` first · `end` last · `enter` open a bucket, prefix, or an object's versions · `space` mark a version · `d` compare the two marked versions · `R` restore the selected version (opens `s3.restore-version`) · `r` reload · `esc` up |
+| Pods | `↑` `↓` (or `k` `j`) move · `pgup` `pgdn` a page · `g` or `home` first · `end` last · `enter` open the pod's log · `n` another namespace (empty for the context's default) · `r` reload · `esc` back |
 | Logs | `f` follow the newest line on/off · `↑` `↓` `pgup` `pgdn` scroll (scrolling up pauses) · `g` oldest line kept · `G` newest · `←` `→` sideways · `/` filter lines · `esc` back (clears a kept filter first) |
 
 `ctrl+c` cancels a run, declines a confirmation, quits from the operation
@@ -381,8 +427,9 @@ read` and nothing is written. When DynamoDB refuses the condition, the item
 is read once more: an item that has gone is reported as not found, and one
 that already holds the change counts as done.
 
-**Audit.** Every run of these two operations leaves one entry in the audit
-log when it ends: ok, declined, denied, dry-run, or error. The entry records
+**Audit.** Every run of these two operations that has its required
+parameters leaves one entry in the audit log when it ends: ok, declined,
+denied, dry-run, or error. The entry records
 the parameters as given, including the values in `--set`. It is written
 after the change, so a process killed in between leaves a change without an
 entry. A failed audit write is a warning (on stderr; in the TUI it stays

@@ -144,7 +144,9 @@ Carried into later milestones from the review: keep a run's warnings (a failed a
 - Whether 0.1.0 is tagged straight from M4 or after a soak period on the last alpha.
 - Whether to add `cargo install --git` instructions (requires the repository to be reachable by the operators).
 
-**Exit criteria:** completions load in bash, zsh, and fish and list every operation; `ss-support --version` shows the tag; every documented config example parses; `make check` and `make msrv` green; `CHANGELOG.md` has a `[0.1.0]` section; tag `v0.1.0`.
+**Exit criteria:** completions load in bash, zsh, and fish and list every operation; `ss-support --version` shows the tag; every documented config example parses; `make check` and `make msrv` green; `CHANGELOG.md` has a `[0.1.0]` section; tag `0.1.0` (tags here have no `v` prefix).
+
+**Status (2026-11-13): landed on branch `distribution` as 0.1.0, and this roadmap is closed** (task plan `docs/2026-11-13-distribution.md`). Completion scripts for bash, zsh, and fish; the bash and fish scripts are asked for completions by the shells in tests (fish in CI), and the zsh script is loaded by zsh. The version shows what git describes when the build is not at its own tag. `docs/configuration.md` is checked by a test. `docs/DESIGN.md` and `docs/TESTING_PLAN.md` describe this codebase. Left to the user: creating the tag, which in this repository has no `v` prefix (`0.1.0`). Not done: the walkthrough of both front-ends against MinIO, dynalite, and a cluster on a real terminal, and `cargo deny` (not installed).
 
 ---
 
