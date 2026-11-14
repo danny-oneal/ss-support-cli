@@ -1,4 +1,4 @@
-//! The read-only DynamoDB port and the types it exchanges.
+//! The DynamoDB port and the types it exchanges.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -132,6 +132,73 @@ impl TableInfo {
     }
 }
 
+/// A change to top-level attributes of one existing item, and what the
+/// change was based on.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ItemChange {
+    /// Attributes to write; each value replaces the whole stored value.
+    pub set: Item,
+    /// Attributes to delete.
+    pub remove: Vec<String>,
+    /// What the item must still hold for the change to be made: an
+    /// attribute's value as it was read, or `None` for an attribute that was
+    /// not there.
+    pub expect: BTreeMap<String, Option<Value>>,
+}
+
+impl ItemChange {
+    /// Checks that the change can be made to the item at `key` at all.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SvcError::Other`] when the change sets and removes nothing,
+    /// names a key attribute, or has an attribute both set and removed.
+    pub fn check(&self, key: &Key) -> Result<(), SvcError> {
+        if self.set.is_empty() && self.remove.is_empty() {
+            return Err(SvcError::Other(anyhow::anyhow!(
+                "the change sets and removes nothing"
+            )));
+        }
+        let touched = || self.set.keys().chain(&self.remove);
+        if let Some(name) = touched().find(|name| key.contains_key(name.as_str())) {
+            return Err(SvcError::Other(anyhow::anyhow!(
+                "{name} is a key attribute and cannot be changed"
+            )));
+        }
+        if let Some(name) = self.remove.iter().find(|name| self.set.contains_key(*name)) {
+            return Err(SvcError::Other(anyhow::anyhow!(
+                "{name} is both set and removed"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The first attribute, by name, that `stored` no longer holds as the
+    /// change expects; `None` when every expectation holds. Numbers compare
+    /// by value, so `1` and `1.0` are the same.
+    pub fn first_broken_expectation(&self, stored: &Item) -> Option<&str> {
+        self.expect
+            .iter()
+            .find(|(name, expected)| !same(stored.get(*name), expected.as_ref()))
+            .map(|(name, _)| name.as_str())
+    }
+}
+
+/// Whether two attribute values, either of which may be absent, are the
+/// same once their numbers are compared by value.
+fn same(a: Option<&Value>, b: Option<&Value>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            let (mut a, mut b) = (a.clone(), b.clone());
+            jsonutil::normalize(&mut a);
+            jsonutil::normalize(&mut b);
+            a == b
+        }
+        _ => false,
+    }
+}
+
 /// A one-line rendering of `key`: attributes sorted by name as `name=value`
 /// joined by `|`, string values unquoted and other values as compact JSON.
 pub fn key_string(key: &Key) -> String {
@@ -147,7 +214,8 @@ pub fn key_string(key: &Key) -> String {
     parts.join("|")
 }
 
-/// Read-only access to DynamoDB.
+/// Access to DynamoDB: reads, and one write, which changes attributes of
+/// one existing item.
 #[async_trait]
 pub trait DdbPort: Send + Sync {
     /// The names of every table visible to the caller, sorted.
@@ -197,6 +265,25 @@ pub trait DdbPort: Send + Sync {
         index: &str,
         q: &QuerySpec,
     ) -> Result<ItemPage, SvcError>;
+
+    /// Applies `change` to the item at `key` in `table`, only if the item
+    /// exists and still holds everything `change.expect` says. Attributes
+    /// the change does not name are not touched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SvcError::NotFound`] when the table or the item does not
+    /// exist, and [`SvcError::Changed`] when an expectation no longer holds;
+    /// nothing is written in either case. Returns [`SvcError::Other`] when
+    /// the change cannot be made at all (see [`ItemChange::check`]), when an
+    /// attribute to set holds a value that cannot be written back from
+    /// JSON, or when the service call fails.
+    async fn update_item(
+        &self,
+        table: &str,
+        key: &Key,
+        change: &ItemChange,
+    ) -> Result<(), SvcError>;
 }
 
 #[cfg(test)]
@@ -238,11 +325,21 @@ mod tests {
         assert!(table.index("tierindex").is_none());
     }
 
-    /// A port with exactly the five read methods and nothing else.
-    struct ReadOnly;
+    /// A port with exactly the five read methods, the one write, and
+    /// nothing else.
+    struct ReadsAndOneWrite;
 
     #[async_trait]
-    impl DdbPort for ReadOnly {
+    impl DdbPort for ReadsAndOneWrite {
+        async fn update_item(
+            &self,
+            _table: &str,
+            _key: &Key,
+            _change: &ItemChange,
+        ) -> Result<(), SvcError> {
+            Ok(())
+        }
+
         async fn list_tables(&self) -> Result<Vec<String>, SvcError> {
             Ok(Vec::new())
         }
@@ -270,10 +367,10 @@ mod tests {
     }
 
     #[test]
-    fn the_port_trait_has_no_write_method() {
+    fn the_only_write_in_the_port_is_an_update_of_one_item() {
         // Compiles only while the trait has no required method beyond the
-        // five reads above.
-        let _port: &dyn DdbPort = &ReadOnly;
+        // five reads and the one write above.
+        let _port: &dyn DdbPort = &ReadsAndOneWrite;
 
         let production = include_str!("mod.rs")
             .split("#[cfg(test)]")
@@ -285,7 +382,6 @@ mod tests {
         );
         let needles = [
             concat!("put", "_item"),
-            concat!("update", "_item"),
             concat!("delete", "_item"),
             concat!("batch", "_write"),
             concat!("transact", "_write"),
@@ -313,5 +409,67 @@ mod tests {
             [AttrType::S, AttrType::N, AttrType::B].map(|t| t.to_string()),
             ["S", "N", "B"]
         );
+    }
+
+    fn change(set: serde_json::Value, remove: &[&str]) -> ItemChange {
+        ItemChange {
+            set: item(set),
+            remove: remove.iter().map(|name| (*name).to_owned()).collect(),
+            expect: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_change_must_do_something_and_leave_the_key_alone() {
+        let key = item(json!({"TenantId": "acme", "Version": "V0"}));
+
+        assert!(
+            change(json!({"Tier": "gold"}), &["note"])
+                .check(&key)
+                .is_ok()
+        );
+        for (bad, why) in [
+            (change(json!({}), &[]), "sets and removes nothing"),
+            (change(json!({"Version": "V1"}), &[]), "key attribute"),
+            (change(json!({}), &["TenantId"]), "key attribute"),
+            (
+                change(json!({"Tier": "gold"}), &["Tier"]),
+                "both set and removed",
+            ),
+        ] {
+            let err = bad.check(&key).expect_err(why);
+            assert!(err.to_string().contains(why), "{err}");
+            assert!(!err.is_not_found() && !err.is_changed(), "{err}");
+        }
+    }
+
+    #[test]
+    fn an_expectation_holds_while_the_attribute_is_as_it_was_read() {
+        let stored = item(json!({"Tier": "gold", "limits": {"rps": 50, "burst": 100.0}}));
+        let expecting = |name: &str, value: Option<serde_json::Value>| ItemChange {
+            expect: [(name.to_owned(), value)].into(),
+            ..ItemChange::default()
+        };
+
+        for held in [
+            expecting("Tier", Some(json!("gold"))),
+            // Numbers compare by value, and members in any order.
+            expecting("limits", Some(json!({"burst": 100, "rps": 50.0}))),
+            expecting("note", None),
+        ] {
+            assert_eq!(held.first_broken_expectation(&stored), None, "{held:?}");
+        }
+        for (broken, name) in [
+            (expecting("Tier", Some(json!("platinum"))), "Tier"),
+            (expecting("Tier", None), "Tier"),
+            (expecting("note", Some(json!("x"))), "note"),
+            (expecting("limits", Some(json!({"rps": 50}))), "limits"),
+        ] {
+            assert_eq!(
+                broken.first_broken_expectation(&stored),
+                Some(name),
+                "{broken:?}"
+            );
+        }
     }
 }

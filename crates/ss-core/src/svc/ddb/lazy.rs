@@ -6,7 +6,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use tokio::sync::OnceCell;
 
-use super::{DdbPort, Item, ItemPage, Key, QuerySpec, TableInfo};
+use super::{DdbPort, Item, ItemChange, ItemPage, Key, QuerySpec, TableInfo};
 use crate::ops::BoxFuture;
 use crate::svc::SvcError;
 
@@ -68,6 +68,15 @@ impl DdbPort for Lazy {
         q: &QuerySpec,
     ) -> Result<ItemPage, SvcError> {
         self.resolve().await?.query_index(table, index, q).await
+    }
+
+    async fn update_item(
+        &self,
+        table: &str,
+        key: &Key,
+        change: &ItemChange,
+    ) -> Result<(), SvcError> {
+        self.resolve().await?.update_item(table, key, change).await
     }
 }
 
@@ -137,5 +146,23 @@ mod tests {
     async fn lazy_satisfies_the_contract() {
         let (lazy, _) = counting(seeded());
         contract::run(&lazy, "tenants", "nope").await;
+    }
+
+    #[tokio::test]
+    async fn lazy_satisfies_the_write_contract() {
+        let fake = seeded();
+        let (lazy, built) = counting(fake.clone());
+
+        contract::run_writes(&lazy, "tenants", "nope").await;
+
+        assert_eq!(built.load(Ordering::SeqCst), 1);
+        let stored = fake
+            .get_item("tenants", &contract::seed_items()[2].clone())
+            .await
+            .expect("the item the suite edits");
+        assert_eq!(
+            stored["limits"]["rps"], 75,
+            "the update reached the wrapped port"
+        );
     }
 }
