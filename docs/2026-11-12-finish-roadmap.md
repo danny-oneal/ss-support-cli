@@ -126,6 +126,8 @@ Carried into later milestones from the review: keep a run's warnings (a failed a
 
 **Exit criteria:** fake-backed operation tests including the no-op restore, the refused key-attribute edit, the changed-since-preview refusal, and the dry run; contract suites green against MinIO and dynalite (`make contract`, `make contract-ddb`); a TUI end-to-end test confirms and runs each write; `ss-support ops list` shows ten real operations.
 
+**Status (2026-11-13): landed on branch `write-ops` as 0.1.0-alpha.7** (task plan `docs/2026-11-13-guarded-writes.md`, whose Decisions section settles the open decisions above). `s3.restore-version` is `Mutate` and a server-side copy; `ddb.item-edit` is `Destructive`, takes `--set` (a JSON object) and `--remove`, and is conditional on the previewed values of the attributes it touches. Decided while building: a dry run now returns the preview; a write's preview ignores `diff.ignore`; the DynamoDB adapter reads the item and conditions on its stored native values, and refuses to set an attribute that holds a set or binary data; a whole number too large to be written exactly is refused. The adapters' writes are checked against MinIO and dynalite in CI only.
+
 ## M4 — Minimal distribution → 0.1.0
 
 **Deliverable:** an operator can install, complete, configure, and identify the tool from the repository alone.
