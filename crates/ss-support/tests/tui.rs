@@ -847,3 +847,156 @@ async fn an_interrupt_while_tailing_exits_130_and_drops_the_stream() {
         .await
         .expect("the stream is dropped when the TUI exits");
 }
+
+/// A bucket holding `orders.json` at `v1` (limit 100) and `v2` (limit 250).
+fn two_versions() -> FakeS3 {
+    let at = |hour| {
+        Utc.with_ymd_and_hms(2026, 1, 2, hour, 0, 0)
+            .single()
+            .expect("valid")
+    };
+    let fake = FakeS3::new();
+    fake.insert("config-dev", "orders.json", "v1", r#"{"limit":100}"#, at(1));
+    fake.insert("config-dev", "orders.json", "v2", r#"{"limit":250}"#, at(2));
+    fake
+}
+
+/// Opens the restore form for `v1` of `orders.json` from the S3 browser and
+/// runs it up to its question.
+async fn restore_v1_up_to_the_question(tui: &Tui) -> String {
+    tui.wait_for("Operations").await;
+    tui.key(KeyCode::Char('b'));
+    tui.wait_for("> config-dev").await;
+    tui.key(KeyCode::Enter);
+    tui.wait_for("> orders.json").await;
+    tui.key(KeyCode::Enter);
+    tui.wait_for("[ ] v1").await;
+    tui.key(KeyCode::Down);
+    tui.send(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT));
+    tui.wait_for("Restore object version").await;
+    tui.key(KeyCode::Enter);
+    let shown = tui.wait_for("Proceed with s3.restore-version?").await;
+    tui.settle().await;
+    shown
+}
+
+async fn current_orders(fake: &FakeS3) -> String {
+    use ss_core::svc::s3::S3Port as _;
+    let object = fake
+        .get_version("config-dev", "orders.json", "")
+        .await
+        .expect("current version");
+    String::from_utf8(object.body).expect("text")
+}
+
+async fn order_versions(fake: &FakeS3) -> usize {
+    use ss_core::svc::s3::S3Port as _;
+    fake.list_versions("config-dev", "orders.json")
+        .await
+        .expect("history")
+        .len()
+}
+
+#[tokio::test]
+async fn a_restore_from_the_browser_is_previewed_confirmed_and_done() {
+    let root = home();
+    allow_dev(root.path());
+    let fake = two_versions();
+    let services = Services::isolated(root.path()).with_s3(Arc::new(fake.clone()));
+    let tui = Tui::start(services, &[]);
+
+    let shown = restore_v1_up_to_the_question(&tui).await;
+    assert!(
+        shown.contains("config-dev/orders.json") && shown.contains("limit"),
+        "the question shows what will change: {shown}"
+    );
+    assert_eq!(
+        order_versions(&fake).await,
+        2,
+        "nothing is copied before the answer"
+    );
+
+    tui.type_text("y");
+    tui.key(KeyCode::Enter);
+    let shown = tui.wait_for("New current version").await;
+
+    assert!(shown.contains("Previous current version"), "{shown}");
+    assert_eq!(current_orders(&fake).await, r#"{"limit":100}"#);
+    assert_eq!(order_versions(&fake).await, 3);
+    let audit = fs::read_to_string(root.path().join(".local/state/ss-support/audit.log"))
+        .expect("the run is audited");
+    assert_eq!(audit.lines().count(), 1, "{audit}");
+    assert!(
+        audit.contains(r#""op":"s3.restore-version""#) && audit.contains(r#""outcome":"ok""#),
+        "{audit}"
+    );
+}
+
+#[tokio::test]
+async fn a_restore_that_meets_a_newer_version_reports_the_change() {
+    let root = home();
+    allow_dev(root.path());
+    let fake = two_versions();
+    let services = Services::isolated(root.path()).with_s3(Arc::new(fake.clone()));
+    let tui = Tui::start(services, &[]);
+    restore_v1_up_to_the_question(&tui).await;
+
+    // Someone else writes while the question is open.
+    fake.put("config-dev", "orders.json", r#"{"limit":999}"#);
+    tui.type_text("y");
+    tui.key(KeyCode::Enter);
+    let shown = tui.wait_for("changed since it was read").await;
+
+    assert!(shown.contains("failed"), "{shown}");
+    assert_eq!(current_orders(&fake).await, r#"{"limit":999}"#);
+    assert_eq!(order_versions(&fake).await, 3, "nothing was copied");
+}
+
+#[tokio::test]
+async fn an_item_edit_needs_the_table_name_typed() {
+    use ss_core::svc::ddb::contract::{seed_items, table_info};
+    use ss_core::svc::ddb::{DdbPort as _, FakeDdb};
+
+    let root = home();
+    allow_dev(root.path());
+    let ddb = FakeDdb::new();
+    ddb.create_table(table_info("tenants"));
+    for item in seed_items() {
+        ddb.put("tenants", item);
+    }
+    let services = Services::isolated(root.path()).with_ddb(Arc::new(ddb.clone()));
+    let tui = Tui::start(services, &[]);
+    let serde_json::Value::Object(key) = serde_json::json!({"TenantId": "acme", "Version": "V1"})
+    else {
+        unreachable!("a JSON object literal is an object")
+    };
+
+    tui.open("ddb.item-edit").await;
+    tui.wait_for("Table").await;
+    tui.type_text("tenants");
+    tui.key(KeyCode::Tab);
+    tui.type_text("TenantId=acme,Version=V1");
+    tui.key(KeyCode::Tab);
+    tui.type_text(r#"{"Tier":"silver"}"#);
+    tui.key(KeyCode::Enter);
+    let shown = tui.wait_for("This is DESTRUCTIVE").await;
+    tui.settle().await;
+    assert!(
+        shown.contains("gold") && shown.contains("silver"),
+        "the question shows what will change: {shown}"
+    );
+
+    tui.type_text("tenant");
+    tui.key(KeyCode::Enter);
+    tui.wait_for("name does not match").await;
+    let item = ddb.get_item("tenants", &key).await.expect("the item");
+    assert_eq!(item["Tier"], "gold");
+
+    tui.type_text("s");
+    tui.key(KeyCode::Enter);
+    tui.wait_for("updated").await;
+
+    let item = ddb.get_item("tenants", &key).await.expect("the item");
+    assert_eq!(item["Tier"], "silver");
+    assert_eq!(item["limits"]["rps"], 100);
+}

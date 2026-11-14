@@ -519,6 +519,8 @@ struct ProgressScreen {
     modal: Option<ConfirmModal>,
     cancel: CancellationToken,
     ended: Option<Ended>,
+    /// What went wrong beside the run without failing it, so far.
+    warnings: Vec<String>,
 }
 
 impl ProgressScreen {
@@ -530,6 +532,7 @@ impl ProgressScreen {
             modal: None,
             cancel: CancellationToken::new(),
             ended: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -545,6 +548,10 @@ impl ProgressScreen {
         if !failure.views.is_empty() {
             detail.push_str("\n\n");
             detail.push_str(&render::text(&failure.views));
+        }
+        // The status line is gone at the next key; these are not.
+        for warning in &self.warnings {
+            detail.push_str(&format!("\n\nwarning: {warning}"));
         }
         self.ended = Some(Ended {
             headline,
@@ -589,7 +596,13 @@ impl Screen for ProgressScreen {
     fn update(&mut self, msg: Msg, ctx: &Ctx) -> Vec<Cmd> {
         match msg {
             Msg::Progress(progress) => self.steps.apply(progress),
-            Msg::Warning(warning) => return vec![Cmd::Status(format!("warning: {warning}"))],
+            // Kept for what the run ends on; until then the status line
+            // says it.
+            Msg::Warning(warning) => {
+                let status = Cmd::Status(format!("warning: {warning}"));
+                self.warnings.push(warning);
+                return vec![status];
+            }
             // A question or an ending changes what the next key means, so
             // keys already on their way are dropped: they were typed at
             // the screen as it was.
@@ -608,6 +621,7 @@ impl Screen for ProgressScreen {
                                 Arc::clone(&self.op),
                                 input,
                                 result,
+                                std::mem::take(&mut self.warnings),
                                 ctx,
                             ))),
                         ];
@@ -1326,7 +1340,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_warning_from_the_run_is_shown_in_the_status_line() {
+    async fn a_warning_from_the_run_stays_on_the_result() {
         let mut ctx = ctx();
         ctx.audit = Arc::new(Unwritable);
         let (op, _done) = write_op(Class::Mutate);
@@ -1335,9 +1349,39 @@ mod tests {
         press(&mut shell, &[enter()]);
         settle(&mut shell, "Proceed with stub.op?").await;
         press(&mut shell, &[ch('y'), enter()]);
-        let shown = settle(&mut shell, "view 1/1").await;
+        settle(&mut shell, "view 1/1").await;
+        // A key clears the status line; the warning is part of the result.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        press(&mut shell, &[key(KeyCode::Down)]);
 
-        assert!(shown.contains("warning: audit log: disk full"), "{shown}");
+        let shown = render_shell(&shell, 80, 24);
+        assert_eq!(
+            shown.matches("warning: audit log: disk full").count(),
+            1,
+            "{shown}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_warning_from_a_run_that_failed_stays_with_the_failure() {
+        let mut ctx = ctx();
+        ctx.audit = Arc::new(Unwritable);
+        let op = StubOp::new("stub.fail", Class::Mutate, Behavior::Fail("boom"))
+            .with_params(vec![Param::new("target").label("Target").required(true)]);
+        let mut shell = shell_with(ctx, Arc::new(op), "x");
+
+        press(&mut shell, &[enter()]);
+        settle(&mut shell, "— failed").await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        press(&mut shell, &[key(KeyCode::Down)]);
+
+        let shown = render_shell(&shell, 80, 24);
+        assert!(shown.contains("boom"), "{shown}");
+        assert_eq!(
+            shown.matches("warning: audit log: disk full").count(),
+            1,
+            "{shown}"
+        );
     }
 
     #[test]

@@ -23,6 +23,8 @@ use crate::tui::theme;
 
 /// The operation two marked versions are handed to.
 const VERSION_DIFF: &str = "s3.version-diff";
+/// The operation `R` opens for the selected version.
+const RESTORE: &str = "s3.restore-version";
 /// How to compare two versions, said when `d` cannot.
 const HOW_TO_DIFF: &str = "mark two versions with space, then press d";
 /// How times are shown in listings.
@@ -326,6 +328,37 @@ impl S3Browse {
         vec![Cmd::Push(Box::new(OpsForm::with_input(op, &input, ctx)))]
     }
 
+    /// Opens the restore form for the selected version.
+    fn restore(&self, ctx: &Ctx) -> Vec<Cmd> {
+        let (Level::Versions { bucket, key }, Some(Row::Version(version))) =
+            (&self.level, self.rows.get(self.selected))
+        else {
+            return status("open an object's versions and select the one to restore");
+        };
+        if version.is_delete {
+            return status("a delete marker has no content to restore");
+        }
+        if version.is_latest {
+            return status("this is already the current version");
+        }
+        // The id `null` also means "the current version", so it cannot
+        // name an older one.
+        if is_current(&version.id) {
+            return status(&format!(
+                "the version with id {:?} has no id of its own and cannot be restored",
+                version.id
+            ));
+        }
+        let Some(op) = ctx.registry.get(RESTORE) else {
+            return status(&format!("{RESTORE} is not available"));
+        };
+        let mut input = Input::default();
+        input.insert("bucket", bucket.as_str());
+        input.insert("key", key.as_str());
+        input.insert("version", version.id.as_str());
+        vec![Cmd::Push(Box::new(OpsForm::with_input(op, &input, ctx)))]
+    }
+
     fn on_key(&mut self, key: KeyEvent, ctx: &Ctx) -> Vec<Cmd> {
         if key
             .modifiers
@@ -341,6 +374,7 @@ impl S3Browse {
             KeyCode::Char('r') => return self.reload(),
             KeyCode::Char(' ') => return self.mark(),
             KeyCode::Char('d') => return self.diff(ctx),
+            KeyCode::Char('R') => return self.restore(ctx),
             KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => self.selected = (self.selected + 1).min(last),
             KeyCode::PageUp => self.selected = self.selected.saturating_sub(page),
@@ -447,7 +481,9 @@ impl Screen for S3Browse {
         match self.level {
             Level::Buckets => "↑↓ move · enter open · r reload · esc back",
             Level::Objects { .. } => "↑↓ move · enter open · r reload · esc up",
-            Level::Versions { .. } => "↑↓ move · space mark · d diff marked · r reload · esc up",
+            Level::Versions { .. } => {
+                "↑↓ move · space mark · d diff marked · R restore · r reload · esc up"
+            }
         }
         .to_owned()
     }
@@ -1096,5 +1132,108 @@ mod tests {
             shown.contains("[x] v3") && shown.contains("[x] v2"),
             "{shown}"
         );
+    }
+
+    fn shift(c: char) -> ratatui::crossterm::event::KeyEvent {
+        ratatui::crossterm::event::KeyEvent::new(
+            KeyCode::Char(c),
+            ratatui::crossterm::event::KeyModifiers::SHIFT,
+        )
+    }
+
+    #[tokio::test]
+    async fn shift_r_opens_the_restore_form_for_the_selected_version() {
+        let mut shell = on_versions(ctx_with(seeded())).await;
+
+        press(&mut shell, &[down(), down(), shift('R')]);
+
+        assert_eq!(shell.depth(), 2);
+        assert!(render_shell(&shell, 80, 24).contains("Restore object version"));
+        assert_eq!(field(&shell, "Bucket"), "config-dev");
+        assert_eq!(field(&shell, "Key"), "app/orders.json");
+        assert_eq!(field(&shell, "Version"), "v1");
+    }
+
+    #[tokio::test]
+    async fn shift_r_on_what_cannot_be_restored_says_why() {
+        // The latest version.
+        let mut shell = on_versions(ctx_with(seeded())).await;
+        press(&mut shell, &[shift('R')]);
+        assert!(
+            render_shell(&shell, 80, 24).contains("this is already the current version"),
+            "{}",
+            render_shell(&shell, 80, 24)
+        );
+        assert_eq!(shell.depth(), 1);
+
+        // A delete marker.
+        let fake = seeded();
+        fake.delete("config-dev", "app/orders.json");
+        fake.put("config-dev", "app/orders.json", "{}");
+        let mut shell = on_versions(ctx_with(fake)).await;
+        press(&mut shell, &[down(), shift('R')]);
+        assert!(
+            render_shell(&shell, 80, 24).contains("a delete marker has no content to restore"),
+            "{}",
+            render_shell(&shell, 80, 24)
+        );
+        assert_eq!(shell.depth(), 1);
+    }
+
+    #[tokio::test]
+    async fn shift_r_on_a_version_without_an_id_says_it_cannot_be_named() {
+        let fake = FakeS3::new();
+        fake.insert("config-dev", "app/orders.json", "null", "{}", at(1));
+        fake.insert("config-dev", "app/orders.json", "v2", "{}", at(2));
+        let mut shell = browser(ctx_with(fake));
+        settle(&mut shell, "config-dev").await;
+        press(&mut shell, &[enter()]);
+        settle(&mut shell, "app/").await;
+        press(&mut shell, &[enter()]);
+        settle(&mut shell, "orders.json").await;
+        press(&mut shell, &[enter()]);
+        settle(&mut shell, "v2").await;
+
+        press(&mut shell, &[down(), shift('R')]);
+
+        assert!(
+            render_shell(&shell, 80, 24).contains("has no id of its own and cannot be restored"),
+            "{}",
+            render_shell(&shell, 80, 24)
+        );
+        assert_eq!(shell.depth(), 1);
+    }
+
+    #[tokio::test]
+    async fn shift_r_outside_a_version_list_says_where_to_go() {
+        let mut shell = browser(ctx_with(seeded()));
+        settle(&mut shell, "logs-dev").await;
+
+        press(&mut shell, &[shift('R')]);
+
+        assert!(
+            render_shell(&shell, 80, 24)
+                .contains("open an object's versions and select the one to restore")
+        );
+        assert_eq!(shell.depth(), 1);
+    }
+
+    #[tokio::test]
+    async fn shift_r_reports_when_restore_is_not_registered() {
+        let mut ctx = ctx_with(seeded());
+        ctx.registry = ops::Registry::new();
+        let mut shell = on_versions(ctx).await;
+
+        press(&mut shell, &[down(), shift('R')]);
+
+        assert!(render_shell(&shell, 80, 24).contains("s3.restore-version is not available"));
+        assert_eq!(shell.depth(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_version_list_says_how_to_restore() {
+        let shell = on_versions(ctx_with(seeded())).await;
+
+        assert!(render_shell(&shell, 100, 24).contains("R restore"));
     }
 }
