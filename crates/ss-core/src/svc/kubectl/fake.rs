@@ -1,6 +1,6 @@
 //! An in-memory [`KubectlPort`] for tests.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
@@ -15,6 +15,8 @@ struct State {
     /// Listings keyed by `(namespace, resource)`.
     lists: BTreeMap<(String, String), Vec<u8>>,
     log_lines: Vec<String>,
+    /// Namespaces that exist without holding anything seeded.
+    namespaces: BTreeSet<String>,
 }
 
 /// A [`KubectlPort`] backed by canned responses. Clones share their data.
@@ -44,6 +46,12 @@ impl FakeKubectl {
             .insert((namespace.to_owned(), resource.to_owned()), json.into());
     }
 
+    /// Makes `namespace` exist though nothing is seeded in it. A namespace
+    /// also exists once a resource or a listing has been seeded in it.
+    pub fn insert_namespace(&self, namespace: &str) {
+        self.lock().namespaces.insert(namespace.to_owned());
+    }
+
     /// Sets the lines `logs` replays before closing the channel.
     pub fn set_log_lines(&self, lines: Vec<String>) {
         self.lock().log_lines = lines;
@@ -62,8 +70,20 @@ impl KubectlPort for FakeKubectl {
         resource: &str,
         name: &str,
     ) -> Result<Vec<u8>, SvcError> {
+        let state = self.lock();
+        // A namespace is a resource of its own, outside any namespace.
+        if namespace.is_empty() && resource == "namespace" {
+            let exists = state.namespaces.contains(name)
+                || state.items.keys().any(|(ns, _, _)| ns == name)
+                || state.lists.keys().any(|(ns, _)| ns == name);
+            return if exists {
+                Ok(format!(r#"{{"metadata":{{"name":{name:?}}}}}"#).into_bytes())
+            } else {
+                Err(SvcError::not_found(format!("namespace/{name}")))
+            };
+        }
         let key = (namespace.to_owned(), resource.to_owned(), name.to_owned());
-        self.lock()
+        state
             .items
             .get(&key)
             .cloned()
@@ -72,11 +92,13 @@ impl KubectlPort for FakeKubectl {
 
     async fn list_json(&self, namespace: &str, resource: &str) -> Result<Vec<u8>, SvcError> {
         let key = (namespace.to_owned(), resource.to_owned());
-        self.lock()
+        // kubectl lists a namespace that does not exist as empty.
+        Ok(self
+            .lock()
             .lists
             .get(&key)
             .cloned()
-            .ok_or_else(|| SvcError::not_found(format!("{namespace}/{resource}")))
+            .unwrap_or_else(|| br#"{"items":[]}"#.to_vec()))
     }
 
     async fn logs(
@@ -121,12 +143,33 @@ mod tests {
             k.list_json("default", "pods").await.unwrap(),
             b"{\"items\":[]}"
         );
-        assert!(
-            k.list_json("default", "svc")
-                .await
-                .unwrap_err()
-                .is_not_found()
+        // A listing nobody seeded is empty, as kubectl reports a resource
+        // type with nothing in it and a namespace that does not exist.
+        assert_eq!(
+            k.list_json("default", "svc").await.unwrap(),
+            b"{\"items\":[]}"
         );
+        assert_eq!(
+            k.list_json("nowhere", "pods").await.unwrap(),
+            b"{\"items\":[]}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_namespace_exists_once_it_is_named_or_holds_something() {
+        let k = FakeKubectl::new();
+        k.insert("menu", "configmap", "menu-config", b"{}".to_vec());
+        k.insert_list("orders", "pods", b"{\"items\":[]}".to_vec());
+        k.insert_namespace("empty");
+
+        for known in ["menu", "orders", "empty"] {
+            assert!(
+                k.get_json("", "namespace", known).await.is_ok(),
+                "{known} exists"
+            );
+        }
+        let err = k.get_json("", "namespace", "nowhere").await.unwrap_err();
+        assert!(err.is_not_found(), "{err}");
     }
 
     #[tokio::test]

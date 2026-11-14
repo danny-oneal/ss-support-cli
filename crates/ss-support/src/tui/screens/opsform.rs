@@ -454,9 +454,11 @@ impl Screen for OpsForm {
                     Vec::new()
                 }
                 Loaded::Failed(e) => vec![Cmd::Status(format!("suggestions unavailable: {e}"))],
-                Loaded::Buckets(_) | Loaded::Page(_) | Loaded::Versions(_) | Loaded::Pods(_) => {
-                    Vec::new()
-                }
+                Loaded::Buckets(_)
+                | Loaded::Page(_)
+                | Loaded::Versions(_)
+                | Loaded::Pods(_)
+                | Loaded::NoPodsUnconfirmed(_) => Vec::new(),
             },
             Msg::Loaded(..)
             | Msg::Resize

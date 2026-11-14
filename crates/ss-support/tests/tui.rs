@@ -822,8 +822,11 @@ async fn kubernetes_not_configured_is_shown_and_the_tui_keeps_running() {
     tui.wait_for("Operations").await;
 }
 
+// What the shell does with the stream. That the kubectl behind a stream is
+// gone when the process ends is checked on the built binary, in
+// `tests/signals.rs`.
 #[tokio::test]
-async fn an_interrupt_while_tailing_exits_130_and_stops_the_stream() {
+async fn an_interrupt_while_tailing_exits_130_and_drops_the_stream() {
     let root = home();
     let (port, log) = LiveLog::new();
     let services = Services::isolated(root.path()).with_kubectl(port);

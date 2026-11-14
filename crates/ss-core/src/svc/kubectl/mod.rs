@@ -23,6 +23,11 @@ pub const LOG_TAIL: u32 = 200;
 /// Capacity of the channel a log stream is delivered on.
 pub const LOG_BUFFER: usize = 64;
 
+/// The most bytes one line of a log stream holds: 16 KiB. A longer line
+/// arrives as several lines, so a log with no line break in it cannot grow
+/// memory without bound.
+pub const LOG_LINE_MAX: usize = 16 << 10;
+
 /// Read-only access to a Kubernetes cluster.
 #[async_trait]
 pub trait KubectlPort: Send + Sync {
@@ -45,13 +50,16 @@ pub trait KubectlPort: Send + Sync {
     ///
     /// # Errors
     ///
-    /// [`SvcError::NotFound`] when the resource type or namespace does not
-    /// exist; otherwise any failure to run kubectl or reach the cluster.
+    /// Any failure to run kubectl or reach the cluster. A namespace that does
+    /// not exist is not a failure: kubectl lists it as empty, so a caller
+    /// that needs to tell "empty" from "no such namespace" asks for the
+    /// namespace itself with [`KubectlPort::get_json`].
     async fn list_json(&self, namespace: &str, resource: &str) -> Result<Vec<u8>, SvcError>;
 
     /// Streams a pod's log: the last [`LOG_TAIL`] lines, then new lines while
-    /// `follow` is set. The channel closes when the stream ends; dropping the
-    /// receiver stops it.
+    /// `follow` is set. No line is longer than [`LOG_LINE_MAX`] bytes; a
+    /// longer one arrives in pieces. The channel closes when the stream
+    /// ends; dropping the receiver stops it.
     ///
     /// # Errors
     ///
@@ -71,6 +79,12 @@ pub struct Pod {
     pub name: String,
     /// Lifecycle phase, e.g. `Running`.
     pub phase: String,
+    /// What the pod is doing, as `kubectl get pods` words it: `Terminating`
+    /// while it is being deleted, a waiting container's reason such as
+    /// `CrashLoopBackOff` (prefixed `Init:` for an init container), the
+    /// reason its containers finished with when none is running, and
+    /// otherwise the phase.
+    pub status: String,
     /// Ready containers over total containers, e.g. `1/2`.
     pub ready: String,
     /// Restarts summed over all containers.
@@ -99,6 +113,8 @@ struct PodMeta {
     name: String,
     #[serde(default, rename = "creationTimestamp")]
     created: Option<DateTime<Utc>>,
+    #[serde(default, rename = "deletionTimestamp")]
+    deletion: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -107,6 +123,8 @@ struct PodStatus {
     phase: String,
     #[serde(default, rename = "containerStatuses")]
     containers: Vec<ContainerStatus>,
+    #[serde(default, rename = "initContainerStatuses")]
+    init_containers: Vec<ContainerStatus>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -115,6 +133,58 @@ struct ContainerStatus {
     ready: bool,
     #[serde(default, rename = "restartCount")]
     restarts: u32,
+    #[serde(default)]
+    state: ContainerState,
+}
+
+/// The state of a container; exactly one member is set once it has one.
+#[derive(Debug, Default, Deserialize)]
+struct ContainerState {
+    #[serde(default)]
+    waiting: Option<Reason>,
+    #[serde(default)]
+    running: Option<serde_json::Value>,
+    #[serde(default)]
+    terminated: Option<Reason>,
+}
+
+/// Why a container is waiting or how it finished.
+#[derive(Debug, Default, Deserialize)]
+struct Reason {
+    #[serde(default)]
+    reason: String,
+}
+
+fn waiting_reason(container: &ContainerStatus) -> Option<&str> {
+    let reason = container.state.waiting.as_ref()?.reason.as_str();
+    (!reason.is_empty()).then_some(reason)
+}
+
+fn finished_reason(container: &ContainerStatus) -> Option<&str> {
+    let reason = container.state.terminated.as_ref()?.reason.as_str();
+    (!reason.is_empty()).then_some(reason)
+}
+
+/// What the pod is doing, in the words `kubectl get pods` uses.
+fn status_of(pod: &RawPod) -> String {
+    if pod.metadata.deletion.is_some() {
+        return "Terminating".to_owned();
+    }
+    if let Some(reason) = pod.status.init_containers.iter().find_map(waiting_reason) {
+        return format!("Init:{reason}");
+    }
+    if let Some(reason) = pod.status.containers.iter().find_map(waiting_reason) {
+        return reason.to_owned();
+    }
+    let running = pod
+        .status
+        .containers
+        .iter()
+        .any(|container| container.state.running.is_some());
+    if !running && let Some(reason) = pod.status.containers.iter().find_map(finished_reason) {
+        return reason.to_owned();
+    }
+    pod.status.phase.clone()
 }
 
 /// Parses the JSON of a `kubectl get pods -o json` listing.
@@ -130,9 +200,11 @@ pub fn parse_pods(raw: &[u8]) -> Result<Vec<Pod>, SvcError> {
         .into_iter()
         .map(|p| {
             let ready = p.status.containers.iter().filter(|c| c.ready).count();
+            let status = status_of(&p);
             Pod {
                 name: p.metadata.name,
                 phase: p.status.phase,
+                status,
                 ready: format!("{ready}/{}", p.status.containers.len()),
                 restarts: p.status.containers.iter().map(|c| c.restarts).sum(),
                 created: p.metadata.created,
@@ -182,6 +254,7 @@ mod tests {
                 Pod {
                     name: "api-7f9".into(),
                     phase: "Running".into(),
+                    status: "Running".into(),
                     ready: "1/2".into(),
                     restarts: 2,
                     created: Some(Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap()),
@@ -189,12 +262,92 @@ mod tests {
                 Pod {
                     name: "worker-1".into(),
                     phase: "Pending".into(),
+                    status: "Pending".into(),
                     ready: "0/0".into(),
                     restarts: 0,
                     created: None,
                 },
             ]
         );
+    }
+
+    /// The status of the one pod in a listing whose `metadata` and `status`
+    /// are the given JSON objects.
+    fn status_of(metadata: &str, status: &str) -> String {
+        let raw = format!(r#"{{"items":[{{"metadata":{metadata},"status":{status}}}]}}"#);
+        let pods = parse_pods(raw.as_bytes()).unwrap();
+        pods[0].status.clone()
+    }
+
+    #[test]
+    fn a_waiting_container_gives_the_pod_its_status() {
+        let status = status_of(
+            r#"{"name":"worker"}"#,
+            r#"{"phase":"Running","containerStatuses":[
+                {"ready":false,"restartCount":41,
+                 "state":{"waiting":{"reason":"CrashLoopBackOff"}}}]}"#,
+        );
+
+        assert_eq!(status, "CrashLoopBackOff");
+    }
+
+    #[test]
+    fn a_finished_container_gives_its_reason_when_nothing_is_running() {
+        let failed = status_of(
+            r#"{"name":"job"}"#,
+            r#"{"phase":"Failed","containerStatuses":[
+                {"state":{"terminated":{"reason":"OOMKilled","exitCode":137}}}]}"#,
+        );
+        let done = status_of(
+            r#"{"name":"job"}"#,
+            r#"{"phase":"Succeeded","containerStatuses":[
+                {"state":{"terminated":{"reason":"Completed","exitCode":0}}}]}"#,
+        );
+
+        assert_eq!((failed.as_str(), done.as_str()), ("OOMKilled", "Completed"));
+    }
+
+    #[test]
+    fn a_running_container_beside_a_finished_one_stays_running() {
+        let status = status_of(
+            r#"{"name":"api"}"#,
+            r#"{"phase":"Running","containerStatuses":[
+                {"ready":true,"state":{"running":{"startedAt":"2026-08-01T00:00:00Z"}}},
+                {"state":{"terminated":{"reason":"Completed"}}}]}"#,
+        );
+
+        assert_eq!(status, "Running");
+    }
+
+    #[test]
+    fn a_waiting_init_container_shows_as_init() {
+        let status = status_of(
+            r#"{"name":"api"}"#,
+            r#"{"phase":"Pending",
+                "initContainerStatuses":[{"state":{"waiting":{"reason":"ImagePullBackOff"}}}],
+                "containerStatuses":[{"state":{"waiting":{"reason":"PodInitializing"}}}]}"#,
+        );
+
+        assert_eq!(status, "Init:ImagePullBackOff");
+    }
+
+    #[test]
+    fn a_pod_being_deleted_is_terminating() {
+        let status = status_of(
+            r#"{"name":"api","deletionTimestamp":"2026-08-01T00:00:00Z"}"#,
+            r#"{"phase":"Running","containerStatuses":[{"ready":true,"state":{"running":{}}}]}"#,
+        );
+
+        assert_eq!(status, "Terminating");
+    }
+
+    #[test]
+    fn a_pod_without_container_states_shows_its_phase() {
+        assert_eq!(
+            status_of(r#"{"name":"api"}"#, r#"{"phase":"Unknown"}"#),
+            "Unknown"
+        );
+        assert_eq!(status_of(r#"{"name":"api"}"#, "{}"), "");
     }
 
     #[test]

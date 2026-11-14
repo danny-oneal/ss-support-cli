@@ -20,6 +20,10 @@ use crate::tui::widgets::text_input::TextInput;
 /// The most log lines kept; older ones are dropped and counted.
 pub const MAX_LINES: usize = 5_000;
 
+/// The most log text kept, in bytes: 8 MiB. Beyond it the oldest lines are
+/// dropped and counted, as they are beyond [`MAX_LINES`].
+pub const MAX_BYTES: usize = 8 << 20;
+
 /// The number this screen gives its one stream.
 const STREAM: u64 = 1;
 
@@ -32,7 +36,7 @@ enum State {
     Open,
     /// No more lines will arrive; the reason, when the stream failed.
     Ended(Option<String>),
-    /// The stream never produced a line; the error takes the screen.
+    /// The stream produced nothing but an error, which takes the screen.
     Failed(String),
 }
 
@@ -41,8 +45,11 @@ pub struct LogsTail {
     kubectl: Option<Arc<dyn KubectlPort>>,
     namespace: String,
     pod: String,
-    /// The newest [`MAX_LINES`] lines, oldest first, ready to draw.
+    /// The newest lines, at most [`MAX_LINES`] of them and [`MAX_BYTES`] of
+    /// text, oldest first, ready to draw.
     lines: VecDeque<String>,
+    /// How many bytes of text `lines` holds.
+    bytes: usize,
     /// How many lines have been dropped from the front.
     dropped: usize,
     /// Whether the view sticks to the newest line.
@@ -75,6 +82,7 @@ impl LogsTail {
             namespace: namespace.to_owned(),
             pod: pod.to_owned(),
             lines: VecDeque::new(),
+            bytes: 0,
             dropped: 0,
             following: true,
             top: 0,
@@ -100,23 +108,40 @@ impl LogsTail {
             .collect()
     }
 
-    /// Adds lines to the buffer, dropping the oldest beyond the limit. While
+    /// Adds lines to the buffer, dropping the oldest beyond the limits. While
     /// the view is not following, it keeps showing the same lines.
     fn append(&mut self, batch: Vec<String>) {
         for raw in batch {
             // One row per line: colour codes go, and nothing in the line may
             // start a new row or drive the terminal.
             let line = clean(&strip_ansi(&raw)).replace('\n', " ");
+            self.bytes += line.len();
             self.lines.push_back(line);
-            if self.lines.len() > MAX_LINES
-                && let Some(oldest) = self.lines.pop_front()
-            {
+            // The newest line is kept whatever its size.
+            while self.lines.len() > MAX_LINES || (self.bytes > MAX_BYTES && self.lines.len() > 1) {
+                let Some(oldest) = self.lines.pop_front() else {
+                    break;
+                };
+                self.bytes = self.bytes.saturating_sub(oldest.len());
                 self.dropped += 1;
                 if !self.following && self.matches(&oldest) {
                     self.top = self.top.saturating_sub(1);
                 }
             }
         }
+    }
+
+    /// What kubectl reported, when the whole log is its one `error:` line: a
+    /// log it could not read at all.
+    fn only_error(&self) -> Option<String> {
+        if self.lines.len() != 1 || self.dropped > 0 {
+            return None;
+        }
+        let mut reason = self.lines.front()?.strip_prefix("error: ")?;
+        while let Some(rest) = reason.strip_prefix("error: ") {
+            reason = rest;
+        }
+        Some(reason.to_owned())
     }
 
     /// The furthest the view can scroll with the rows last drawn.
@@ -290,7 +315,11 @@ impl Screen for LogsTail {
                     // A stream that failed before its first line has nothing
                     // to show but the error.
                     Some(error) if self.lines.is_empty() => State::Failed(error),
-                    reason => State::Ended(reason),
+                    Some(error) => State::Ended(Some(error)),
+                    None => match self.only_error() {
+                        Some(error) => State::Failed(error),
+                        None => State::Ended(None),
+                    },
                 };
             }
             Msg::Lines(..)
@@ -673,16 +702,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stream_that_fails_shows_the_error_and_esc_leaves() {
+    async fn a_stream_that_cannot_open_shows_the_error_and_esc_leaves() {
         let mut ctx = ctx();
         ctx.deps.kubectl = Some(Arc::new(Tail(Mutex::new(Some(Err(
-            "pods \"api-7d9f\" not found".to_owned(),
+            "kubectl not found at \"kubectl\" (install kubectl or put it on PATH)".to_owned(),
         ))))));
         let mut screen = LogsTail::new("orders", "api-7d9f", &ctx);
         assert_eq!(screen.title(), "Logs — orders/api-7d9f");
         let mut shell = Shell::new(ctx.clone(), Box::new(screen));
-        let shown = settle(&mut shell, "not found").await;
-        assert!(shown.contains("error"), "{shown}");
+        let shown = settle(&mut shell, "kubectl not found").await;
+        assert!(shown.contains("┌ error"), "{shown}");
 
         screen = LogsTail::new("orders", "api-7d9f", &ctx);
         screen.init(&ctx);
@@ -705,12 +734,75 @@ mod tests {
         let (mut shell, tx) = tail(8);
         feed(&tx, numbered(0..1)).await;
         settle(&mut shell, "line 0000").await;
-        let ctx = ctx();
-        let mut screen = LogsTail::new("", "api-7d9f", &ctx);
 
-        screen.update(Msg::Lines(99, vec!["from elsewhere".to_owned()]), &ctx);
+        shell.handle(None, Msg::Lines(99, vec!["from elsewhere".to_owned()]));
 
-        assert!(!render_screen(&screen, 60, 6).contains("from elsewhere"));
+        let shown = render_shell(&shell, 80, 24);
+        assert!(shown.contains("1 lines"), "{shown}");
+        assert!(!shown.contains("from elsewhere"), "{shown}");
+    }
+
+    #[tokio::test]
+    async fn a_log_that_is_only_an_error_from_kubectl_shows_the_error() {
+        let (mut shell, tx) = tail(8);
+        feed(
+            &tx,
+            ["error: Error from server (NotFound): pods \"api-7d9f\" not found".to_owned()],
+        )
+        .await;
+        drop(tx);
+
+        let shown = settle(&mut shell, "┌ error").await;
+
+        assert!(
+            shown.contains("│Error from server (NotFound): pods \"api-7d9f\" not found"),
+            "{shown}"
+        );
+        assert!(!shown.contains("following"), "{shown}");
+    }
+
+    #[tokio::test]
+    async fn an_error_after_other_lines_stays_in_the_log() {
+        let (mut shell, tx) = tail(8);
+        feed(
+            &tx,
+            ["line 0000".to_owned(), "error: unexpected EOF".to_owned()],
+        )
+        .await;
+        drop(tx);
+
+        let shown = settle(&mut shell, "log ended").await;
+
+        assert!(
+            shown.contains("line 0000") && shown.contains("error: unexpected EOF"),
+            "{shown}"
+        );
+        assert!(!shown.contains("┌ error"), "{shown}");
+    }
+
+    #[tokio::test]
+    async fn long_lines_are_dropped_by_size_before_the_line_limit() {
+        let (mut shell, tx) = tail(16);
+        let size = MAX_BYTES / 8;
+        feed(
+            &tx,
+            (0..12).map(|i| format!("{i:02}{}", "x".repeat(size - 2))),
+        )
+        .await;
+
+        let shown = settle(&mut shell, "4 earlier lines dropped").await;
+
+        assert!(
+            shown.lines().any(|row| row.starts_with("8 lines ·")),
+            "{shown}"
+        );
+        press(&mut shell, &[ch('g')]);
+        assert!(
+            body(&shell)
+                .first()
+                .is_some_and(|row| row.starts_with("04x")),
+            "the oldest line kept is the fifth"
+        );
     }
 
     #[tokio::test]
@@ -722,11 +814,19 @@ mod tests {
 
     #[test]
     fn a_tiny_area_draws_without_panicking() {
-        let ctx = ctx();
+        let (_tx, rx) = mpsc::channel(1);
+        let mut ctx = ctx();
+        ctx.deps.kubectl = Some(Arc::new(Tail(Mutex::new(Some(Ok(rx))))));
         let mut screen = LogsTail::new("", "api-7d9f", &ctx);
+        screen.update(
+            Msg::Lines(STREAM, vec!["a line of the log".to_owned()]),
+            &ctx,
+        );
         screen.update(Msg::Key(ch('/')), &ctx);
+        assert!(render_screen(&screen, 80, 6).contains("a line of the log"));
 
-        render_screen(&screen, 1, 1);
-        render_screen(&screen, 0, 0);
+        for (width, height) in [(1, 1), (0, 0), (3, 2), (80, 1), (1, 6)] {
+            render_screen(&screen, width, height);
+        }
     }
 }

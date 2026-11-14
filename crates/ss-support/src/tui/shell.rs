@@ -36,6 +36,10 @@ pub const STREAM_BATCH: usize = 256;
 /// The most background results delivered between two draws.
 const RESULTS_PER_DRAW: usize = 64;
 
+/// The least time between two draws when nothing but lines of a stream has
+/// arrived in between. Everything else is drawn at once.
+pub const LINES_REDRAW: Duration = Duration::from_millis(100);
+
 /// Why the event loop ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stop {
@@ -53,19 +57,24 @@ struct OpenStream {
     forwarder: AbortHandle,
 }
 
-/// One screen on the stack, the runs it started, and the streams it opened.
+/// One screen on the stack, the runs it started, the loads it asked for,
+/// and the streams it opened.
 struct Entry {
     id: ScreenId,
     screen: Box<dyn Screen>,
     runs: Vec<CancellationToken>,
+    loads: Vec<AbortHandle>,
     streams: Vec<OpenStream>,
 }
 
 impl Drop for Entry {
-    /// Neither a run nor a stream outlives the screen that shows it.
+    /// No run, load, or stream outlives the screen that shows it.
     fn drop(&mut self) {
         for run in &self.runs {
             run.cancel();
+        }
+        for load in &self.loads {
+            load.abort();
         }
         for stream in &self.streams {
             // Ending the forwarder drops the receiver, which stops the
@@ -274,27 +283,45 @@ impl Shell {
         S: Stream<Item = io::Result<Event>> + Unpin,
     {
         let cancel = self.ctx.cancel.clone();
+        // Whether the screen has changed since it was drawn, whether by more
+        // than lines of a stream, and when lines alone may next be drawn.
+        let mut stale = true;
+        let mut at_once = true;
+        let mut lines_due = Instant::now();
         loop {
-            term.draw(|frame| self.draw(frame))
-                .context("draw the screen")?;
+            if stale && (at_once || Instant::now() >= lines_due) {
+                term.draw(|frame| self.draw(frame))
+                    .context("draw the screen")?;
+                stale = false;
+                at_once = false;
+                lines_due = Instant::now() + LINES_REDRAW;
+            }
             // What the operator typed comes before background results, so a
             // key is acted on by the screen it was typed at and a busy
             // source of results cannot hold back esc or ctrl+c.
             let keep_going = tokio::select! {
                 biased;
                 () = cancel.cancelled() => return Ok(Stop::Interrupted),
-                event = events.next() => match event {
-                    None => false,
-                    Some(Err(e)) => return Err(e).context("read terminal event"),
-                    Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
-                        self.handle(None, Msg::Key(key))
+                event = events.next() => {
+                    stale = true;
+                    at_once = true;
+                    match event {
+                        None => false,
+                        Some(Err(e)) => return Err(e).context("read terminal event"),
+                        Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
+                            self.handle(None, Msg::Key(key))
+                        }
+                        Some(Ok(Event::Paste(text))) => self.handle(None, Msg::Paste(text)),
+                        Some(Ok(Event::Resize(..))) => self.handle(None, Msg::Resize),
+                        Some(Ok(_)) => true,
                     }
-                    Some(Ok(Event::Paste(text))) => self.handle(None, Msg::Paste(text)),
-                    Some(Ok(Event::Resize(..))) => self.handle(None, Msg::Resize),
-                    Some(Ok(_)) => true,
                 },
+                // Lines that arrived since the last draw are now due.
+                () = tokio::time::sleep_until(lines_due), if stale => true,
                 Some((id, msg)) = self.inbox.recv() => {
-                    self.handle(Some(id), msg) && self.deliver_waiting()
+                    stale = true;
+                    at_once |= !matches!(msg, Msg::Lines(..));
+                    self.handle(Some(id), msg) && self.deliver_waiting(&mut at_once)
                 }
             };
             if !keep_going {
@@ -305,12 +332,14 @@ impl Shell {
 
     /// Delivers the background results that are already waiting, up to a
     /// limit, so that a burst of them costs one draw rather than one each.
+    /// Sets `at_once` when one of them is anything but lines of a stream.
     /// Returns false once the TUI should close.
-    fn deliver_waiting(&mut self) -> bool {
+    fn deliver_waiting(&mut self, at_once: &mut bool) -> bool {
         for _ in 1..RESULTS_PER_DRAW {
             let Ok((id, msg)) = self.inbox.try_recv() else {
                 break;
             };
+            *at_once |= !matches!(msg, Msg::Lines(..));
             if !self.handle(Some(id), msg) {
                 return false;
             }
@@ -320,7 +349,8 @@ impl Shell {
 
     /// Cancels every run and waits, up to [`RUN_GRACE`], for them to end.
     async fn finish_runs(&mut self) {
-        // Dropping the screens cancels the runs they started.
+        // Dropping the screens cancels the runs they started and stops their
+        // loads and streams.
         self.stack.clear();
         let runs = std::mem::take(&mut self.runs);
         // A run that does not stop in time is left behind.
@@ -337,6 +367,7 @@ impl Shell {
             id,
             screen,
             runs: Vec::new(),
+            loads: Vec::new(),
             streams: Vec::new(),
         });
         (id, cmds)
@@ -374,12 +405,18 @@ impl Shell {
                     }
                 }
                 Cmd::Task(number, load) => {
-                    let results = self.results.clone();
-                    tokio::spawn(async move {
-                        let loaded = load.await;
-                        // The shell may have closed while the load ran.
-                        let _ = results.send((issuer, Msg::Loaded(number, loaded)));
-                    });
+                    // A load asked for by a screen that has gone has nobody
+                    // to show it, so it never starts.
+                    if let Some(entry) = position.and_then(|index| self.stack.get_mut(index)) {
+                        let results = self.results.clone();
+                        let task = tokio::spawn(async move {
+                            let loaded = load.await;
+                            // The shell may have closed while the load ran.
+                            let _ = results.send((issuer, Msg::Loaded(number, loaded)));
+                        });
+                        entry.loads.retain(|earlier| !earlier.is_finished());
+                        entry.loads.push(task.abort_handle());
+                    }
                 }
                 Cmd::Run(request) => match position.and_then(|index| self.stack.get_mut(index)) {
                     Some(entry) => {
@@ -647,9 +684,13 @@ mod tests {
         let child = popper("child", &log).on_init(move || vec![Cmd::Task(7, task)]);
         let mut shell = Shell::new(ctx(), Box::new(pusher(&log, child)));
         shell.handle(None, Msg::Key(ch('p')));
+        // The load finishes, and its result is waiting when the screen goes.
+        gate.notify_one();
+        while shell.inbox.is_empty() {
+            tokio::task::yield_now().await;
+        }
         shell.handle(None, Msg::Key(ch('x')));
 
-        gate.notify_one();
         assert!(shell.pump().await);
 
         assert_eq!(shell.depth(), 1);
@@ -1268,5 +1309,159 @@ mod tests {
         );
         let drawn = draws.load(std::sync::atomic::Ordering::SeqCst);
         assert!(drawn <= 3, "ten waiting results cost {drawn} draws");
+    }
+
+    /// A load that never finishes and holds `held` for as long as it lives.
+    fn endless(held: mpsc::Receiver<()>) -> ss_core::ops::BoxFuture<Loaded> {
+        Box::pin(async move {
+            let _held = held;
+            std::future::pending::<Loaded>().await
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn popping_a_screen_stops_the_load_it_asked_for() {
+        let log = log();
+        let (tx, rx) = mpsc::channel::<()>(1);
+        let load = endless(rx);
+        let child = popper("child", &log).on_init(move || vec![Cmd::Task(7, load)]);
+        let mut shell = Shell::new(ctx(), Box::new(pusher(&log, child)));
+        shell.handle(None, Msg::Key(ch('p')));
+        tokio::task::yield_now().await;
+
+        shell.handle(None, Msg::Key(ch('x')));
+
+        tokio::time::timeout(Duration::from_secs(5), tx.closed())
+            .await
+            .expect("the load is dropped when its screen goes");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closing_the_shell_stops_every_load() {
+        let log = log();
+        let (tx, rx) = mpsc::channel::<()>(1);
+        let load = endless(rx);
+        let root = Probe::new("root", &log).on_init(move || vec![Cmd::Task(7, load)]);
+        let shell = Shell::new(ctx(), Box::new(root));
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        shell
+            .run_with(&mut term, stream::empty())
+            .await
+            .expect("the loop ends");
+
+        tokio::time::timeout(Duration::from_secs(5), tx.closed())
+            .await
+            .expect("the load is dropped with the shell");
+    }
+
+    /// How many lines the probe was given, over all batches.
+    fn lines_seen(log: &Log) -> usize {
+        entries(log)
+            .iter()
+            .filter_map(|entry| entry.strip_prefix("root:lines:4:"))
+            .map(|batch| batch.split('|').count())
+            .sum()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lines_that_keep_arriving_are_drawn_once_an_interval_not_once_a_batch() {
+        let log = log();
+        let draws = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (tx, rx) = mpsc::channel(1);
+        let lines = stream_of(rx);
+        let root = Probe::new("root", &log)
+            .count_draws(&draws)
+            .on_init(move || vec![Cmd::Stream(4, lines)]);
+        let shell = Shell::new(ctx(), Box::new(root));
+        let feeder = tokio::spawn(async move {
+            for number in 0..40 {
+                tx.send(format!("line {number}"))
+                    .await
+                    .expect("the stream is read");
+                tokio::task::yield_now().await;
+            }
+            // Held open, so the stream does not end.
+            std::future::pending::<()>().await;
+        });
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let events = stream::pending().take_until(tokio::time::sleep(Duration::from_secs(1)));
+
+        shell.run_with(&mut term, Box::pin(events)).await.unwrap();
+        feeder.abort();
+
+        assert_eq!(lines_seen(&log), 40, "{:?}", entries(&log));
+        let batches = entries(&log)
+            .iter()
+            .filter(|entry| entry.starts_with("root:lines:"))
+            .count();
+        assert!(batches >= 10, "the lines arrived in {batches} batches");
+        let drawn = draws.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            (2..=4).contains(&drawn),
+            "{batches} batches of lines cost {drawn} draws"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_key_is_drawn_at_once_while_lines_wait_for_their_interval() {
+        let log = log();
+        let draws = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (tx, rx) = mpsc::channel(8);
+        let lines = stream_of(rx);
+        let root = Probe::new("root", &log)
+            .count_draws(&draws)
+            .on_init(move || vec![Cmd::Stream(4, lines)]);
+        let shell = Shell::new(ctx(), Box::new(root));
+        tx.send("one".to_owned()).await.unwrap();
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let key = stream::once(async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Ok(Event::Key(ch('a')))
+        });
+        // The loop is over before the interval the line waits for has passed.
+        let events = key
+            .chain(stream::pending())
+            .take_until(tokio::time::sleep(Duration::from_millis(50)));
+
+        shell.run_with(&mut term, Box::pin(events)).await.unwrap();
+
+        assert_eq!(
+            entries(&log),
+            ["root:init", "root:lines:4:one", "root:key:a"]
+        );
+        assert_eq!(
+            draws.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one draw to start with and one for the key"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_line_that_arrives_after_a_quiet_spell_is_drawn_at_once() {
+        let log = log();
+        let draws = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (tx, rx) = mpsc::channel(8);
+        let lines = stream_of(rx);
+        let root = Probe::new("root", &log)
+            .count_draws(&draws)
+            .on_init(move || vec![Cmd::Stream(4, lines)]);
+        let shell = Shell::new(ctx(), Box::new(root));
+        let feeder = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            tx.send("late".to_owned())
+                .await
+                .expect("the stream is read");
+            std::future::pending::<()>().await;
+        });
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        // The loop ends before an interval has passed since the line arrived.
+        let events = stream::pending().take_until(tokio::time::sleep(Duration::from_millis(1_010)));
+
+        shell.run_with(&mut term, Box::pin(events)).await.unwrap();
+        feeder.abort();
+
+        assert_eq!(lines_seen(&log), 1, "{:?}", entries(&log));
+        assert_eq!(draws.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

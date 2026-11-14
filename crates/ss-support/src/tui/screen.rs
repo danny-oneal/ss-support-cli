@@ -152,6 +152,9 @@ pub enum Loaded {
     Versions(Vec<Version>),
     /// The pods of one namespace.
     Pods(Vec<Pod>),
+    /// A namespace that lists no pods and could not be confirmed to exist,
+    /// with the reason.
+    NoPodsUnconfirmed(String),
     /// The load failed, with the error to show.
     Failed(String),
 }

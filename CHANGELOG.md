@@ -10,11 +10,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 - A pod list in the TUI (`p`): the pods of the context's default namespace,
-  or of another one (`n`), with ready containers, status, restarts, and age.
-- A log view in the TUI (`enter` on a pod): the pod's log, followed as it
-  grows, with scrolling, a line filter, and sideways scrolling for long
-  lines. The newest 5,000 lines are kept; colour codes are removed. Leaving
-  the view stops kubectl.
+  or of another one (`n`), with ready containers, status as `kubectl get
+  pods` words it, restarts, and age. A named namespace that lists no pods is
+  looked up first, so a mistyped namespace is reported instead of shown as
+  empty.
+- A log view in the TUI (`enter` on a pod): the pod's log from its last 200
+  lines, followed as it grows, with scrolling, a line filter, and sideways
+  scrolling for long lines. The newest 5,000 lines are kept, up to 8 MiB; a
+  line longer than 16 KiB is shown as several; colour codes are removed.
+  Leaving the view stops kubectl.
+
+### Changed
+- Every kubectl process still running is stopped before `ss-support` exits,
+  however it exits: a command that finished, a signal, a second signal, or a
+  panic in the TUI.
+- Leaving a TUI screen stops what it was still waiting for, so a kubectl
+  that has not answered does not outlive the screen that asked.
+- A screen that is only receiving log lines is redrawn at most ten times a
+  second; everything else is drawn at once.
 
 ## [0.1.0-alpha.5] - 2026-11-13
 

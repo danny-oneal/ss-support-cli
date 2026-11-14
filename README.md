@@ -87,7 +87,7 @@ either: results are shown on screen and exported with `e`.
 | Diff view | `n` `p` next/previous change · `pgup` `pgdn` ten changes · `g` first change · `s` unified or side-by-side · `c` one line per change · `/` filter by path |
 | S3 browser | `↑` `↓` move · `enter` open a bucket, prefix, or an object's versions · `space` mark a version · `d` compare the two marked versions · `r` reload · `esc` up |
 | Pods | `↑` `↓` move · `enter` open the pod's log · `n` another namespace (empty for the context's default) · `r` reload · `esc` back |
-| Logs | `f` follow the newest line on/off · `↑` `↓` `pgup` `pgdn` scroll (scrolling up pauses) · `g` oldest line kept · `G` newest · `←` `→` sideways · `/` filter lines · `esc` back |
+| Logs | `f` follow the newest line on/off · `↑` `↓` `pgup` `pgdn` scroll (scrolling up pauses) · `g` oldest line kept · `G` newest · `←` `→` sideways · `/` filter lines · `esc` back (clears a kept filter first) |
 
 `ctrl+c` cancels a run, declines a confirmation, quits from the operation
 list, and goes back one screen anywhere else. `esc` goes back and never quits.
@@ -110,14 +110,31 @@ when it is the latest.
 The pod list and the log read the cluster through kubectl with the
 environment's `kube_context` (or `--context`), and only ever run
 `kubectl get` and `kubectl logs`. The pod list is read once and again on
-`r`; nothing polls the cluster. A log is followed until the screen is left,
-which stops kubectl. The newest 5,000 lines are kept and the screen says how
-many earlier ones were dropped. Colour codes in log lines are removed.
+`r`; nothing polls the cluster. STATUS is what `kubectl get pods` shows: the
+reason a container is waiting (such as `CrashLoopBackOff`), `Terminating` for
+a pod being deleted, and otherwise the pod's phase. kubectl lists a namespace
+that does not exist as empty, so a named namespace without pods is looked up
+before it is shown: a mistyped one is reported as not existing and the
+listing on screen stays, and when the lookup itself is refused the screen
+says that the namespace could not be confirmed. The context's default
+namespace has no name to look up and is shown as listed.
+
+A log starts with the pod's last 200 lines and is followed until the screen
+is left, which stops kubectl. It is the log of the container `kubectl logs`
+picks by default; another container, or a previous run of one, cannot be
+chosen. The newest 5,000 lines are kept, up to 8 MiB of text, and the screen
+says how many earlier ones were dropped. A line longer than 16 KiB is shown
+as several lines. Colour codes in log lines are removed. While lines keep
+arriving the screen is redrawn at most ten times a second; a key is acted on
+and drawn at once. When kubectl could not read the log at all (the pod has
+gone, say), its message takes the screen.
 
 Leaving the TUI exits `0`; SIGTERM or SIGHUP exits `130`. A run still in
 flight is cancelled first and given up to five seconds to stop and write its
-audit entry. The terminal is restored on every way out. A terminal smaller
-than 20x6 shows only `terminal too small`.
+audit entry. The terminal is restored on every way out, and every kubectl
+still running is stopped: when a screen that was waiting for it is left, and
+when the process ends, whether by leaving, a signal, a second signal, or a
+panic. A terminal smaller than 20x6 shows only `terminal too small`.
 
 ## S3
 
