@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{Bucket, Object, ObjectMeta, Page, S3Port, Version, is_current};
+use super::{Bucket, Object, ObjectMeta, Page, S3Port, Version, Versioning, is_current};
 use crate::cache::Store;
 use crate::svc::SvcError;
 
@@ -15,7 +15,8 @@ use crate::svc::SvcError;
 /// A version id never changes what it names, so those fetches are stored and
 /// served from the store afterwards. The current version is always fetched
 /// from the wrapped port, and its concrete id is stored so a later request
-/// for that id is a hit. Every other call goes straight to the wrapped port.
+/// for that id is a hit. Every other call goes straight to the wrapped port;
+/// a copy creates a version under a new id, so nothing stored goes stale.
 pub struct Cached {
     inner: Arc<dyn S3Port>,
     store: Arc<dyn Store>,
@@ -98,6 +99,10 @@ impl S3Port for Cached {
         self.inner.list(bucket, prefix, token).await
     }
 
+    async fn versioning(&self, bucket: &str) -> Result<Versioning, SvcError> {
+        self.inner.versioning(bucket).await
+    }
+
     async fn list_versions(&self, bucket: &str, key: &str) -> Result<Vec<Version>, SvcError> {
         self.inner.list_versions(bucket, key).await
     }
@@ -132,6 +137,15 @@ impl S3Port for Cached {
     async fn head(&self, bucket: &str, key: &str) -> Result<ObjectMeta, SvcError> {
         self.inner.head(bucket, key).await
     }
+
+    async fn copy_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> Result<String, SvcError> {
+        self.inner.copy_version(bucket, key, version_id).await
+    }
 }
 
 #[cfg(test)]
@@ -143,9 +157,9 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
 
-    use super::super::contract::{fixture, run, seeded_fake};
+    use super::super::contract::{fixture, run, run_writes, seeded_fake};
     use super::super::lazy::Lazy;
-    use super::super::{Bucket, FakeS3, Object, ObjectMeta, Page, S3Port, Version};
+    use super::super::{Bucket, FakeS3, Object, ObjectMeta, Page, S3Port, Version, Versioning};
     use super::*;
     use crate::cache::{Dir, Store};
     use crate::svc::SvcError;
@@ -169,6 +183,9 @@ mod tests {
         ) -> Result<Page, SvcError> {
             self.inner.list(bucket, prefix, token).await
         }
+        async fn versioning(&self, bucket: &str) -> Result<Versioning, SvcError> {
+            self.inner.versioning(bucket).await
+        }
         async fn list_versions(&self, bucket: &str, key: &str) -> Result<Vec<Version>, SvcError> {
             self.inner.list_versions(bucket, key).await
         }
@@ -183,6 +200,14 @@ mod tests {
         }
         async fn head(&self, bucket: &str, key: &str) -> Result<ObjectMeta, SvcError> {
             self.inner.head(bucket, key).await
+        }
+        async fn copy_version(
+            &self,
+            bucket: &str,
+            key: &str,
+            version_id: &str,
+        ) -> Result<String, SvcError> {
+            self.inner.copy_version(bucket, key, version_id).await
         }
     }
 
@@ -355,5 +380,53 @@ mod tests {
         let cached = over(fake.clone());
         let paged = over(fake.paged(2));
         run(&fixture(&cached, &paged, ids, marker)).await;
+    }
+
+    #[tokio::test]
+    async fn cached_lazy_satisfies_the_write_contract() {
+        let (fake, ids, marker) = seeded_fake();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn Store> = Arc::new(Dir::new(dir.path()));
+        let over = |port: FakeS3| {
+            let lazy = Lazy::new(move || {
+                let port: Arc<dyn S3Port> = Arc::new(port.clone());
+                Box::pin(async move { Ok(port) })
+            });
+            Cached::new(Arc::new(lazy), Arc::clone(&store))
+        };
+        let cached = over(fake.clone());
+        let paged = over(fake.paged(2));
+        let fx = fixture(&cached, &paged, ids, marker);
+        // The reads fill the store before the write.
+        run(&fx).await;
+
+        run_writes(&fx).await;
+    }
+
+    #[tokio::test]
+    async fn a_copy_goes_to_the_wrapped_port_and_the_new_version_is_fetched_from_it() {
+        let r = rig();
+        r.cached.get_version("b", "k", "v1").await.expect("fill");
+        let before = r.calls();
+
+        let created = r.cached.copy_version("b", "k", "v1").await.expect("copy");
+
+        assert_eq!(
+            r.fake.list_versions("b", "k").await.expect("history")[0].id,
+            created
+        );
+        let current = r.cached.get_version("b", "k", "").await.expect("current");
+        assert_eq!(
+            (current.body.as_slice(), current.version_id.as_str()),
+            (&br#"{"a":1}"#[..], created.as_str())
+        );
+        assert_eq!(
+            r.calls(),
+            before + 1,
+            "the current version is fetched, not served from the store"
+        );
+        // What was stored for the copied version is still valid.
+        r.cached.get_version("b", "k", "v1").await.expect("stored");
+        assert_eq!(r.calls(), before + 1);
     }
 }

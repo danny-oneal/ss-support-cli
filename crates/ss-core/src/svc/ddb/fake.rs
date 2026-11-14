@@ -13,7 +13,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use async_trait::async_trait;
 use serde_json::Value;
 
-use super::{DdbPort, IndexInfo, Item, ItemPage, Key, Projection, QuerySpec, TableInfo};
+use super::{
+    DdbPort, IndexInfo, Item, ItemChange, ItemPage, Key, Projection, QuerySpec, TableInfo,
+};
 use crate::svc::SvcError;
 
 /// A number with a total order, so numeric keys sort numerically.
@@ -170,6 +172,22 @@ struct Table {
     indexes: BTreeMap<String, Index>,
 }
 
+impl Table {
+    /// Stores `item`, replacing the item with the same key, and refreshes
+    /// the entry of every index derived from it.
+    fn store(&mut self, item: Item) -> Result<(), SvcError> {
+        let (hash, sort) = base_key(&self.info, &item)?;
+        for index in self.indexes.values_mut() {
+            index.remove(&(hash.clone(), sort.clone()));
+            if let Some(entry) = index.derive(&self.info, &item) {
+                index.place(&self.info, entry)?;
+            }
+        }
+        self.items.entry(hash).or_default().insert(sort, item);
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default)]
 struct State {
     tables: BTreeMap<String, Table>,
@@ -245,17 +263,8 @@ impl FakeDdb {
             .tables
             .get_mut(table)
             .unwrap_or_else(|| panic!("put into missing table {table:?}"));
-        let (hash, sort) =
-            base_key(&t.info, &item).unwrap_or_else(|e| panic!("put into {table:?}: {e}"));
-        for index in t.indexes.values_mut() {
-            index.remove(&(hash.clone(), sort.clone()));
-            if let Some(entry) = index.derive(&t.info, &item) {
-                index
-                    .place(&t.info, entry)
-                    .unwrap_or_else(|e| panic!("index {:?}: {e}", index.info.name));
-            }
-        }
-        t.items.entry(hash).or_default().insert(sort, item);
+        t.store(item)
+            .unwrap_or_else(|e| panic!("put into {table:?}: {e}"));
     }
 
     /// Replaces (or adds) the entry of `index` whose base key equals
@@ -486,6 +495,34 @@ impl DdbPort for FakeDdb {
     async fn query(&self, q: &QuerySpec) -> Result<ItemPage, SvcError> {
         let state = self.lock();
         query_table(state.table(&q.table)?, q, self.page_size)
+    }
+
+    async fn update_item(
+        &self,
+        table: &str,
+        key: &Key,
+        change: &ItemChange,
+    ) -> Result<(), SvcError> {
+        change.check(key)?;
+        let mut state = self.lock();
+        let t = state
+            .tables
+            .get_mut(table)
+            .ok_or_else(|| SvcError::not_found(format!("table {table}")))?;
+        let what = format!("{table} {}", super::key_string(key));
+        let (hash, sort) = base_key(&t.info, key)?;
+        let Some(stored) = t.items.get(&hash).and_then(|part| part.get(&sort)) else {
+            return Err(SvcError::not_found(what));
+        };
+        if let Some(name) = change.first_broken_expectation(stored) {
+            return Err(SvcError::changed(format!("{what}: attribute {name}")));
+        }
+        let mut item = stored.clone();
+        item.extend(change.set.clone());
+        for name in &change.remove {
+            item.remove(name);
+        }
+        t.store(item)
     }
 
     async fn query_index(
@@ -768,5 +805,189 @@ mod tests {
     #[tokio::test]
     async fn fake_satisfies_the_contract() {
         contract::run(&tenants(), "tenants", "nope").await;
+    }
+
+    fn editing(set: Value, remove: &[&str], expect: &[(&str, Option<Value>)]) -> ItemChange {
+        let Value::Object(set) = set else {
+            panic!("the attributes to set are an object");
+        };
+        ItemChange {
+            set,
+            remove: remove.iter().map(|name| (*name).to_owned()).collect(),
+            expect: expect
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), value.clone()))
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn update_sets_and_removes_attributes_and_leaves_the_rest() {
+        let ddb = tenants();
+        let before = ddb
+            .get_item("tenants", &key("acme", "V1"))
+            .await
+            .expect("item");
+
+        ddb.update_item(
+            "tenants",
+            &key("acme", "V1"),
+            &editing(
+                serde_json::json!({"note": "raised", "limits": {"rps": 75}}),
+                &["Tier"],
+                &[("Tier", Some(before["Tier"].clone())), ("note", None)],
+            ),
+        )
+        .await
+        .expect("update");
+
+        let after = ddb
+            .get_item("tenants", &key("acme", "V1"))
+            .await
+            .expect("item");
+        assert_eq!(
+            Value::Object(after),
+            serde_json::json!({
+                "TenantId": "acme",
+                "Version": "V1",
+                "note": "raised",
+                "limits": {"rps": 75},
+            })
+        );
+        // The item beside it is untouched.
+        let other = ddb
+            .get_item("tenants", &key("acme", "V0"))
+            .await
+            .expect("item");
+        assert_eq!(other["Tier"], "platinum");
+    }
+
+    #[tokio::test]
+    async fn update_of_a_missing_item_or_table_is_not_found() {
+        let ddb = tenants();
+        let change = editing(serde_json::json!({"note": "x"}), &[], &[]);
+
+        let missing = ddb
+            .update_item("tenants", &key("acme", "V9"), &change)
+            .await
+            .expect_err("no such item");
+        assert!(missing.is_not_found(), "{missing}");
+        let no_table = ddb
+            .update_item("nope", &key("acme", "V0"), &change)
+            .await
+            .expect_err("no such table");
+        assert!(no_table.is_not_found(), "{no_table}");
+        // Nothing was created.
+        assert!(ddb.get_item("tenants", &key("acme", "V9")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn update_is_refused_as_changed_when_an_expectation_no_longer_holds() {
+        let ddb = tenants();
+        let before = ddb
+            .get_item("tenants", &key("acme", "V1"))
+            .await
+            .expect("item");
+
+        for expect in [
+            ("Tier", Some(serde_json::json!("platinum"))),
+            ("Tier", None),
+            ("note", Some(serde_json::json!("was here"))),
+        ] {
+            let err = ddb
+                .update_item(
+                    "tenants",
+                    &key("acme", "V1"),
+                    &editing(
+                        serde_json::json!({"Tier": "silver"}),
+                        &[],
+                        std::slice::from_ref(&expect),
+                    ),
+                )
+                .await
+                .expect_err("the item is not as expected");
+            assert!(err.is_changed(), "{expect:?}: {err}");
+            assert!(err.to_string().contains(expect.0), "{err}");
+        }
+        assert_eq!(
+            ddb.get_item("tenants", &key("acme", "V1"))
+                .await
+                .expect("item"),
+            before,
+            "a refused update writes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expected_number_matches_whatever_its_spelling() {
+        let ddb = tenants();
+
+        ddb.update_item(
+            "tenants",
+            &key("acme", "V1"),
+            &editing(
+                serde_json::json!({"note": "ok"}),
+                &[],
+                &[(
+                    "limits",
+                    Some(serde_json::json!({"rps": 100.0, "burst": 200})),
+                )],
+            ),
+        )
+        .await
+        .expect("the limits are as expected");
+    }
+
+    #[tokio::test]
+    async fn update_refuses_key_attributes_and_an_empty_change() {
+        let ddb = tenants();
+
+        for change in [
+            editing(serde_json::json!({"Version": "V7"}), &[], &[]),
+            editing(serde_json::json!({}), &["TenantId"], &[]),
+            editing(serde_json::json!({}), &[], &[]),
+        ] {
+            let err = ddb
+                .update_item("tenants", &key("acme", "V1"), &change)
+                .await
+                .expect_err("not a change that can be made");
+            assert!(!err.is_not_found() && !err.is_changed(), "{err}");
+        }
+        assert_eq!(
+            versions(&ddb.query(&by_tenant("acme")).await.expect("query")),
+            ["V0", "V1", "V2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn index_entries_follow_an_update() {
+        let ddb = tenants();
+
+        ddb.update_item(
+            "tenants",
+            &key("acme", "V1"),
+            &editing(serde_json::json!({"Tier": "silver"}), &[], &[]),
+        )
+        .await
+        .expect("update");
+
+        let silver = ddb
+            .query_index("tenants", "TierIndex", &by_tier("silver"))
+            .await
+            .expect("index");
+        assert_eq!(versions(&silver), ["V1"]);
+        let gold = ddb
+            .query_index("tenants", "TierIndex", &by_tier("gold"))
+            .await
+            .expect("index");
+        assert_eq!(versions(&gold), ["V2"]);
+    }
+
+    #[tokio::test]
+    async fn fake_satisfies_the_write_contract() {
+        let ddb = tenants();
+
+        contract::run_writes(&ddb, "tenants", "nope").await;
+        contract::run_document_writes(&ddb, "tenants").await;
     }
 }

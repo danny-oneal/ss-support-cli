@@ -325,7 +325,14 @@ mod tests {
         send(&mut picker, &[key(KeyCode::Down)]);
         let second = selected(&picker);
         assert_ne!(first, second);
-        assert!(second.starts_with("ddb."), "{second}");
+        let shown = render_screen(&picker, 100, 30);
+        assert!(
+            shown
+                .lines()
+                .nth(2)
+                .is_some_and(|row| row.starts_with("> ")),
+            "the second row of the filtered list is selected: {shown}"
+        );
 
         let cmds = send(&mut picker, &[key(KeyCode::Enter)]);
         let opened = ops::builtin().get(&second).unwrap().meta().name;

@@ -6,7 +6,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use tokio::sync::OnceCell;
 
-use super::{Bucket, Object, ObjectMeta, Page, S3Port, Version};
+use super::{Bucket, Object, ObjectMeta, Page, S3Port, Version, Versioning};
 use crate::ops::BoxFuture;
 use crate::svc::SvcError;
 
@@ -58,6 +58,10 @@ impl S3Port for Lazy {
         self.resolve().await?.list(bucket, prefix, token).await
     }
 
+    async fn versioning(&self, bucket: &str) -> Result<Versioning, SvcError> {
+        self.resolve().await?.versioning(bucket).await
+    }
+
     async fn list_versions(&self, bucket: &str, key: &str) -> Result<Vec<Version>, SvcError> {
         self.resolve().await?.list_versions(bucket, key).await
     }
@@ -77,6 +81,18 @@ impl S3Port for Lazy {
     async fn head(&self, bucket: &str, key: &str) -> Result<ObjectMeta, SvcError> {
         self.resolve().await?.head(bucket, key).await
     }
+
+    async fn copy_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> Result<String, SvcError> {
+        self.resolve()
+            .await?
+            .copy_version(bucket, key, version_id)
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -88,7 +104,7 @@ mod tests {
 
     use super::super::FakeS3;
     use super::super::S3Port;
-    use super::super::contract::{fixture, run, seeded_fake};
+    use super::super::contract::{fixture, run, run_writes, seeded_fake};
     use super::*;
 
     fn counting(port: FakeS3) -> (Lazy, Arc<AtomicUsize>) {
@@ -138,5 +154,24 @@ mod tests {
         let (lazy, _) = counting(fake.clone());
         let (paged, _) = counting(fake.paged(2));
         run(&fixture(&lazy, &paged, ids, marker)).await;
+    }
+
+    #[tokio::test]
+    async fn lazy_satisfies_the_write_contract() {
+        let (fake, ids, marker) = seeded_fake();
+        let (lazy, built) = counting(fake.clone());
+        let (paged, _) = counting(fake.paged(2));
+
+        run_writes(&fixture(&lazy, &paged, ids, marker)).await;
+
+        assert_eq!(built.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fake.get_version("ss-config", "cfg/tenants/acme.json", "")
+                .await
+                .expect("current")
+                .body,
+            super::super::contract::BODIES[0].as_bytes(),
+            "the copy reached the wrapped port"
+        );
     }
 }

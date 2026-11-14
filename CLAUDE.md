@@ -46,6 +46,7 @@ An `Operation` (`ss-core/src/ops/operation.rs`) declares `Meta` (id like `demo.j
 `ops/runner.rs` wraps every run: fills defaults, checks required params, applies the `Guard` (writes refused unless the env is allowlisted in config), writes the JSONL audit entry, emits `Progress`, handles cancellation and `--dry-run`.
 
 - Ops do work through `r.step(name, ..)` (read) and `r.mutate(name, ..)` (write). `mutate` triggers the confirmation (typed resource name for destructive ops; `--yes` never covers destructive ones), stops a dry run, and errors with `ReadOnlyMutation` in a `Class::Read` op.
+- A dry run returns the views registered with `r.preview` after the note that it stopped.
 - `execute` returns `Result<OpResult, RunFailure>`; `FailureKind` (Usage/Denied/Declined/Cancelled/Failed) is what `ss-support/src/run.rs` maps to exit codes.
 
 ### Exit codes and errors (`ss-support/src/run.rs`)
@@ -87,6 +88,7 @@ ratatui + crossterm. `shell.rs` owns a stack of `Screen`s (`screen.rs`: `title`,
 - Config structs use `serde_yaml_ng` with `#[serde(deny_unknown_fields, default)]`.
 - `async_trait` only on dyn-dispatched traits (`Operation`, future resource ports); native `async fn` elsewhere.
 - Kubernetes access is read-only by design — no rollout restart or scaling operations.
+- Exactly two operations write, each through the one write of its port: `s3.restore-version` (`S3Port::copy_version`) and `ddb.item-edit` (`DdbPort::update_item`); `tests/writes.rs` pins the list. A write operation previews the full change (the config's ignore globs and keyed array matching are for comparisons, not for a write's preview) and, inside `r.mutate`, writes only while what it previewed still holds, failing with `SvcError::Changed` otherwise. The DynamoDB adapter conditions on the stored native values, not on their JSON rendering, so a set stays a set.
 - Update `CHANGELOG.md` (Keep a Changelog, `[Unreleased]`) for user-visible changes; commits use Conventional Commits with a scope (`fix(cli): …`). The README flag table and exit-code list must match behavior.
 
 ## Docs

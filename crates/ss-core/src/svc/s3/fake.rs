@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use super::{Bucket, Object, ObjectMeta, Page, S3Port, Version, is_current};
+use super::{Bucket, Object, ObjectMeta, Page, S3Port, Version, Versioning, is_current};
 use crate::svc::SvcError;
 
 /// One entry in a key's history.
@@ -30,7 +30,11 @@ enum Row {
 struct State {
     /// bucket -> key -> history, oldest first.
     buckets: BTreeMap<String, BTreeMap<String, Vec<Entry>>>,
-    /// Shared by [`FakeS3::put`] and [`FakeS3::delete`] for generated ids.
+    /// Buckets that do not keep versions the usual way; every other bucket
+    /// has versioning enabled.
+    versioning: BTreeMap<String, Versioning>,
+    /// Shared by [`FakeS3::put`], [`FakeS3::delete`], and copies for
+    /// generated ids.
     counter: u64,
 }
 
@@ -59,6 +63,12 @@ impl FakeS3 {
     /// Creates an empty bucket; does nothing when it already exists.
     pub fn create_bucket(&self, bucket: &str) {
         self.lock().buckets.entry(bucket.to_owned()).or_default();
+    }
+
+    /// Sets what [`S3Port::versioning`] reports for `bucket`. Nothing else
+    /// changes: the fake goes on keeping every version it is given.
+    pub fn set_versioning(&self, bucket: &str, versioning: Versioning) {
+        self.lock().versioning.insert(bucket.to_owned(), versioning);
     }
 
     /// Appends a version as the newest, creating the bucket when needed. The
@@ -148,6 +158,18 @@ impl S3Port for FakeS3 {
                 created: None,
             })
             .collect())
+    }
+
+    async fn versioning(&self, bucket: &str) -> Result<Versioning, SvcError> {
+        let state = self.lock();
+        if !state.buckets.contains_key(bucket) {
+            return Err(SvcError::not_found(bucket));
+        }
+        Ok(state
+            .versioning
+            .get(bucket)
+            .copied()
+            .unwrap_or(Versioning::Enabled))
     }
 
     async fn list(
@@ -282,6 +304,49 @@ impl S3Port for FakeS3 {
             ..object.meta
         })
     }
+
+    /// The copy is stamped now and gets a generated id (`copy-{n}`).
+    async fn copy_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> Result<String, SvcError> {
+        if is_current(version_id) {
+            return Err(SvcError::Other(anyhow::anyhow!(
+                "{bucket}/{key}: the version to copy must be named by its own id"
+            )));
+        }
+        let mut state = self.lock();
+        let source = history_of(&state, bucket, key)?
+            .iter()
+            .find(|entry| match entry {
+                Entry::Object(object) => object.version_id == version_id,
+                Entry::DeleteMarker { id, .. } => id == version_id,
+            })
+            .cloned();
+        let mut object = match source {
+            Some(Entry::Object(object)) => object,
+            Some(Entry::DeleteMarker { .. }) => {
+                return Err(SvcError::Other(anyhow::anyhow!(
+                    "{bucket}/{key}@{version_id} is a delete marker"
+                )));
+            }
+            None => return Err(SvcError::not_found(format!("{bucket}/{key}@{version_id}"))),
+        };
+        state.counter += 1;
+        let id = format!("copy-{}", state.counter);
+        object.version_id.clone_from(&id);
+        object.meta.modified = Some(Utc::now());
+        if let Some(history) = state
+            .buckets
+            .get_mut(bucket)
+            .and_then(|keys| keys.get_mut(key))
+        {
+            history.push(Entry::Object(object));
+        }
+        Ok(id)
+    }
 }
 
 #[cfg(test)]
@@ -402,5 +467,114 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(marker.as_str(), true, true), (v1.as_str(), false, false)]
         );
+    }
+
+    /// A key written three times: `put-1`, `put-2`, `put-3`.
+    fn three_versions() -> FakeS3 {
+        let s3 = FakeS3::new();
+        for body in ["one", "two", "three"] {
+            s3.put("b", "k", body);
+        }
+        s3
+    }
+
+    #[tokio::test]
+    async fn copy_version_adds_a_new_current_version_with_the_same_body() {
+        let s3 = three_versions();
+
+        let created = s3.copy_version("b", "k", "put-1").await.expect("copy");
+
+        let history = s3.list_versions("b", "k").await.expect("history");
+        assert_eq!(
+            history.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
+            [created.as_str(), "put-3", "put-2", "put-1"]
+        );
+        assert!(history[0].is_latest && !history[1].is_latest);
+        let current = s3.get_version("b", "k", "").await.expect("current");
+        assert_eq!(
+            (current.body, current.version_id),
+            (b"one".to_vec(), created)
+        );
+        // The version that was current is still there.
+        assert_eq!(
+            s3.get_version("b", "k", "put-3")
+                .await
+                .expect("previous")
+                .body,
+            b"three"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_version_of_something_missing_is_not_found() {
+        let s3 = three_versions();
+
+        for (bucket, key, version) in [
+            ("b", "k", "put-9"),
+            ("b", "nope", "put-1"),
+            ("x", "k", "put-1"),
+        ] {
+            let err = s3
+                .copy_version(bucket, key, version)
+                .await
+                .expect_err("nothing to copy");
+            assert!(err.is_not_found(), "{bucket}/{key}@{version}: {err}");
+        }
+        assert_eq!(s3.list_versions("b", "k").await.expect("history").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn copy_version_refuses_a_delete_marker_and_a_version_without_its_own_id() {
+        let s3 = three_versions();
+        let marker = s3.delete("b", "k");
+
+        for version in [marker.as_str(), "", "null"] {
+            let err = s3
+                .copy_version("b", "k", version)
+                .await
+                .expect_err("not something that can be copied");
+            assert!(!err.is_not_found(), "{version:?}: {err}");
+        }
+        assert_eq!(s3.list_versions("b", "k").await.expect("history").len(), 4);
+    }
+
+    #[tokio::test]
+    async fn copy_version_over_a_delete_marker_makes_the_object_listed_again() {
+        let s3 = three_versions();
+        s3.delete("b", "k");
+        assert!(
+            s3.list("b", "", None)
+                .await
+                .expect("list")
+                .objects
+                .is_empty()
+        );
+
+        s3.copy_version("b", "k", "put-2").await.expect("copy");
+
+        let page = s3.list("b", "", None).await.expect("list");
+        assert_eq!(keys(&page), ["k"]);
+        assert_eq!(
+            s3.get_version("b", "k", "").await.expect("current").body,
+            b"two"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bucket_keeps_versions_unless_told_otherwise() {
+        let s3 = three_versions();
+        assert_eq!(
+            s3.versioning("b").await.expect("bucket"),
+            Versioning::Enabled
+        );
+
+        s3.set_versioning("b", Versioning::Suspended);
+        assert_eq!(
+            s3.versioning("b").await.expect("bucket"),
+            Versioning::Suspended
+        );
+
+        let err = s3.versioning("nope").await.expect_err("no such bucket");
+        assert!(err.is_not_found(), "{err}");
     }
 }

@@ -41,15 +41,28 @@ pub struct OpsResult {
     views: Vec<View>,
     panes: Vec<Pane>,
     current: usize,
+    /// What went wrong beside the run without failing it, such as an audit
+    /// entry that could not be written; shown above every view.
+    warnings: Vec<String>,
     /// The preset-name prompt, while it is open.
     saving: Option<Prompt>,
     /// How many rows the view was last drawn on; a page scrolls by this.
     rows: Cell<usize>,
 }
 
+/// The most warnings shown above a result.
+const MAX_WARNINGS: usize = 3;
+
 impl OpsResult {
-    /// A screen showing `result`, the outcome of running `op` with `input`.
-    pub fn new(op: Arc<dyn Operation>, input: Input, result: OpResult, _ctx: &Ctx) -> Self {
+    /// A screen showing `result`, the outcome of running `op` with `input`,
+    /// under the `warnings` the run gave.
+    pub fn new(
+        op: Arc<dyn Operation>,
+        input: Input,
+        result: OpResult,
+        warnings: Vec<String>,
+        _ctx: &Ctx,
+    ) -> Self {
         let panes = result.views.iter().map(pane).collect();
         OpsResult {
             op,
@@ -57,6 +70,10 @@ impl OpsResult {
             views: result.views,
             panes,
             current: 0,
+            warnings: warnings
+                .iter()
+                .map(|warning| clean(&format!("warning: {warning}")).replace('\n', " "))
+                .collect(),
             saving: None,
             rows: Cell::new(1),
         }
@@ -215,11 +232,25 @@ impl Screen for OpsResult {
     }
 
     fn view(&self, frame: &mut Frame, area: Rect) {
-        let [body, prompt] = Layout::vertical([
+        // The view keeps at least one row when there is one to keep.
+        let shown = self
+            .warnings
+            .len()
+            .min(MAX_WARNINGS)
+            .min(usize::from(area.height.saturating_sub(1)));
+        let [warnings, body, prompt] = Layout::vertical([
+            Constraint::Length(u16::try_from(shown).unwrap_or(0)),
             Constraint::Min(0),
             Constraint::Length(u16::from(self.saving.is_some())),
         ])
         .areas(area);
+        let lines: Vec<Line> = self
+            .warnings
+            .iter()
+            .take(shown)
+            .map(|warning| Line::styled(warning.as_str(), theme::error()))
+            .collect();
+        frame.render_widget(Paragraph::new(lines), warnings);
         self.rows.set(usize::from(body.height));
         match self.panes.get(self.current) {
             None => frame.render_widget(
@@ -325,7 +356,7 @@ mod tests {
     }
 
     fn screen(views: Vec<View>, ctx: &Ctx) -> OpsResult {
-        OpsResult::new(op(), input(), OpResult { views }, ctx)
+        OpsResult::new(op(), input(), OpResult { views }, Vec::new(), ctx)
     }
 
     fn press(
@@ -587,6 +618,7 @@ mod tests {
             OpResult {
                 views: vec![summary()],
             },
+            Vec::new(),
             &ctx,
         );
         press(&mut screen, &ctx, &[ctrl('s')]);
@@ -658,5 +690,67 @@ mod tests {
         screen.update(Msg::Paste("lim".to_owned()), &ctx);
 
         assert!(render_screen(&screen, 50, 4).contains("/ lim"));
+    }
+
+    #[test]
+    fn warnings_from_the_run_stay_above_the_result() {
+        let ctx = ctx();
+        let mut screen = OpsResult::new(
+            op(),
+            input(),
+            OpResult {
+                views: vec![summary(), diff_view()],
+            },
+            vec![
+                "audit log: disk full".to_owned(),
+                "second\twarning\x1b[2J".to_owned(),
+            ],
+            &ctx,
+        );
+
+        let shown = render_screen(&screen, 80, 12);
+        let rows: Vec<&str> = shown.lines().collect();
+        assert_eq!(rows[0], "warning: audit log: disk full");
+        assert_eq!(rows[1], "warning: second warning[2J");
+
+        // They are still there on the next view and after any key.
+        press(&mut screen, &ctx, &[key(KeyCode::Tab), key(KeyCode::Down)]);
+        let shown = render_screen(&screen, 80, 12);
+        assert!(
+            shown.starts_with("warning: audit log: disk full\n"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn a_result_without_warnings_starts_with_its_view() {
+        let ctx = ctx();
+        let screen = screen(vec![summary()], &ctx);
+
+        assert!(!render_screen(&screen, 80, 12).contains("warning"));
+    }
+
+    #[test]
+    fn warnings_leave_room_for_the_view_on_a_short_screen() {
+        let ctx = ctx();
+        let screen = OpsResult::new(
+            op(),
+            input(),
+            OpResult {
+                views: vec![summary()],
+            },
+            (0..10).map(|i| format!("warning number {i}")).collect(),
+            &ctx,
+        );
+
+        for (width, height) in [(80, 6), (80, 2), (1, 1), (0, 0)] {
+            render_screen(&screen, width, height);
+        }
+        let shown = render_screen(&screen, 80, 6);
+        assert!(shown.contains("warning number 0"), "{shown}");
+        assert!(
+            shown.lines().count() >= 4 && !shown.contains("warning number 5"),
+            "at most three warnings are shown: {shown}"
+        );
     }
 }

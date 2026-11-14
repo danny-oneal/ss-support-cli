@@ -447,6 +447,28 @@ async fn dry_run_is_a_success_with_a_summary_and_is_audited() {
 }
 
 #[tokio::test]
+async fn a_dry_run_shows_what_the_operation_was_about_to_change() {
+    let op = script(Class::Mutate, vec![Act::Preview, Act::Mutate("write")]);
+    let mutated = op.mutated.clone();
+    let result = Runner::new(Deps::default())
+        .dry_run(true)
+        .execute(&op, Input::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        result.views,
+        [
+            View::summary([
+                ("Operation", "test.op"),
+                ("Outcome", "dry-run: stopped before the first mutating step"),
+            ]),
+            View::summary([("About to", "write things")]),
+        ]
+    );
+    assert_eq!(mutated.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn declined_run_carries_a_summary_and_is_audited() {
     let op = script(Class::Mutate, vec![Act::Decline]);
     let audit = Arc::new(RecordingAudit::default());

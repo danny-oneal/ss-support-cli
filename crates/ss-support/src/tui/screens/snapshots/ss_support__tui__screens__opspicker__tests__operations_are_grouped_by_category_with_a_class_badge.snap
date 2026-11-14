@@ -11,10 +11,12 @@ Demo
 DynamoDB
   ddb.gsi-consistency  GSI consistency check    read         Diff an item against its projection in
   ddb.item-compare     Compare items            read         Semantic diff between two DynamoDB item
+  ddb.item-edit        Edit item                destructive  Set and remove attributes of one Dynamo
   ddb.item-history     Item history             read         List an item's versions (V0 = latest) a
 S3
   s3.object-inspect    Inspect object           read         Metadata, version history, and body pre
   s3.prefix-audit      Audit prefix             read         Object count, size, age spread, and lar
+  s3.restore-version   Restore object version   mutate       Make an earlier version of an S3 object
   s3.version-diff      Compare object versions  read         Semantic diff between two versions of o
 Zeta
   zz.drop-table        Drop a table             destructive  removes a table and its items

@@ -1,8 +1,9 @@
 //! The DynamoDB port backed by the AWS SDK.
 //!
 //! A missing table or index becomes [`SvcError::NotFound`]; every other SDK
-//! failure is kept whole as [`SvcError::Other`]. The adapter only reads: it
-//! never issues a write call.
+//! failure is kept whole as [`SvcError::Other`]. The one write is a
+//! conditional update of attributes of one item; no other write call is
+//! issued.
 
 use std::collections::HashMap;
 
@@ -22,7 +23,8 @@ use serde_json::{Number, Value};
 use ss_core::jsonutil;
 use ss_core::svc::SvcError;
 use ss_core::svc::ddb::{
-    AttrType, DdbPort, IndexInfo, Item, ItemPage, Key, Projection, QuerySpec, TableInfo, key_string,
+    AttrType, DdbPort, IndexInfo, Item, ItemChange, ItemPage, Key, Projection, QuerySpec,
+    TableInfo, key_string,
 };
 
 /// How [`AwsDdb`] reaches DynamoDB.
@@ -187,6 +189,214 @@ impl DdbPort for AwsDdb {
         };
         self.run_query(&spec, Some(index)).await
     }
+
+    /// The item is read first, so that what the change expects is compared
+    /// with the stored values as DynamoDB holds them (a set stays a set),
+    /// and the write is made conditional on those same stored values. When
+    /// DynamoDB refuses the condition the item is read once more, to tell a
+    /// deleted item and a change that has already been made from a change
+    /// by someone else.
+    async fn update_item(
+        &self,
+        table: &str,
+        key: &Key,
+        change: &ItemChange,
+    ) -> Result<(), SvcError> {
+        change.check(key)?;
+        let what = format!("{table} {}", key_string(key));
+        let key_av = key_to_av(key)?;
+        let stored = self
+            .read_native(table, &what, &key_av)
+            .await?
+            .ok_or_else(|| SvcError::not_found(what.clone()))?;
+        let request = update_request(&what, key, change, &stored)?;
+        match self
+            .send_update(table, &what, key_av.clone(), request)
+            .await
+        {
+            Err(refusal) if refusal.is_changed() => {
+                let now = self
+                    .read_native(table, &what, &key_av)
+                    .await?
+                    .map(item_from_av)
+                    .transpose()?;
+                after_refusal(&what, change, now.as_ref(), refusal)
+            }
+            other => other,
+        }
+    }
+}
+
+impl AwsDdb {
+    /// The item at `key` as DynamoDB holds it, read consistently; `None`
+    /// when there is no such item.
+    async fn read_native(
+        &self,
+        table: &str,
+        what: &str,
+        key: &HashMap<String, AttributeValue>,
+    ) -> Result<Option<HashMap<String, AttributeValue>>, SvcError> {
+        let out = self
+            .client
+            .get_item()
+            .table_name(table)
+            .set_key(Some(key.clone()))
+            .consistent_read(true)
+            .send()
+            .await
+            .map_err(|e| svc_error(what, e))?;
+        Ok(out.item.filter(|item| !item.is_empty()))
+    }
+
+    /// Sends one conditional update.
+    ///
+    /// # Errors
+    ///
+    /// [`SvcError::Changed`] when DynamoDB finds that the condition does not
+    /// hold; nothing is written then.
+    async fn send_update(
+        &self,
+        table: &str,
+        what: &str,
+        key: HashMap<String, AttributeValue>,
+        request: UpdateRequest,
+    ) -> Result<(), SvcError> {
+        self.client
+            .update_item()
+            .table_name(table)
+            .set_key(Some(key))
+            .update_expression(request.update)
+            .condition_expression(request.condition)
+            .set_expression_attribute_names(Some(request.names))
+            .set_expression_attribute_values((!request.values.is_empty()).then_some(request.values))
+            .send()
+            .await
+            .map_err(|e| {
+                if e.code() == Some("ConditionalCheckFailedException") {
+                    SvcError::changed(what)
+                } else {
+                    svc_error(what, e)
+                }
+            })?;
+        Ok(())
+    }
+}
+
+/// What a refused condition means, given the item as it is `now`: not found
+/// when it has gone; nothing left to do when it already holds what the
+/// change writes, as after an attempt whose answer was lost; otherwise the
+/// refusal itself.
+fn after_refusal(
+    what: &str,
+    change: &ItemChange,
+    now: Option<&Item>,
+    refusal: SvcError,
+) -> Result<(), SvcError> {
+    match now {
+        None => Err(SvcError::not_found(what)),
+        Some(item) if change.is_applied_to(item) => Ok(()),
+        Some(_) => Err(refusal),
+    }
+}
+
+/// One conditional `UpdateItem` request, as it will be sent.
+#[derive(Debug)]
+struct UpdateRequest {
+    /// The update expression: a `SET` clause, a `REMOVE` clause, or both.
+    update: String,
+    /// The condition: the item exists and holds what the change expects.
+    condition: String,
+    /// Every attribute name the expressions use, by placeholder.
+    names: HashMap<String, String>,
+    /// Every value the expressions use, by placeholder.
+    values: HashMap<String, AttributeValue>,
+}
+
+/// The request that applies `change` to the item `what` names, at `key`,
+/// which holds `stored`. An expected value is compared in the condition as
+/// it is stored, not as JSON renders it.
+///
+/// # Errors
+///
+/// [`SvcError::Changed`] when `stored` no longer holds what the change
+/// expects. [`SvcError::Other`] when an attribute to set holds a set or
+/// binary data, which JSON cannot express, so that writing it back would
+/// change its type; or when a value cannot be encoded.
+fn update_request(
+    what: &str,
+    key: &Key,
+    change: &ItemChange,
+    stored: &HashMap<String, AttributeValue>,
+) -> Result<UpdateRequest, SvcError> {
+    let rendered = item_from_av(stored.clone())?;
+    if let Some(name) = change.first_broken_expectation(&rendered) {
+        return Err(SvcError::changed(format!("{what}: attribute {name}")));
+    }
+    let mut names = HashMap::new();
+    let mut values = HashMap::new();
+    let mut conditions = Vec::new();
+    // Every item has its key attributes, so one of them being there means
+    // the item is.
+    if let Some(name) = key.keys().next() {
+        names.insert("#k0".to_owned(), name.clone());
+        conditions.push("attribute_exists(#k0)".to_owned());
+    }
+    let mut sets = Vec::new();
+    for (i, (name, value)) in change.set.iter().enumerate() {
+        if let Some(kind) = stored.get(name).and_then(not_json) {
+            return Err(SvcError::Other(anyhow!(
+                "{what}: attribute {name} holds {kind}, which cannot be written back from JSON"
+            )));
+        }
+        let av: AttributeValue = serde_dynamo::to_attribute_value(value).map_err(|e| {
+            SvcError::Other(anyhow::Error::from(e).context(format!("encode attribute {name}")))
+        })?;
+        names.insert(format!("#s{i}"), name.clone());
+        values.insert(format!(":s{i}"), av);
+        sets.push(format!("#s{i} = :s{i}"));
+    }
+    let mut removes = Vec::new();
+    for (i, name) in change.remove.iter().enumerate() {
+        names.insert(format!("#r{i}"), name.clone());
+        removes.push(format!("#r{i}"));
+    }
+    for (i, name) in change.expect.keys().enumerate() {
+        names.insert(format!("#e{i}"), name.clone());
+        match stored.get(name) {
+            Some(av) => {
+                values.insert(format!(":e{i}"), av.clone());
+                conditions.push(format!("#e{i} = :e{i}"));
+            }
+            None => conditions.push(format!("attribute_not_exists(#e{i})")),
+        }
+    }
+    let mut clauses = Vec::new();
+    if !sets.is_empty() {
+        clauses.push(format!("SET {}", sets.join(", ")));
+    }
+    if !removes.is_empty() {
+        clauses.push(format!("REMOVE {}", removes.join(", ")));
+    }
+    Ok(UpdateRequest {
+        update: clauses.join(" "),
+        condition: conditions.join(" AND "),
+        names,
+        values,
+    })
+}
+
+/// What `av` holds, at any depth, that JSON cannot express: a set or binary
+/// data. `None` when the whole value can be written back from JSON.
+fn not_json(av: &AttributeValue) -> Option<&'static str> {
+    match av {
+        AttributeValue::Ss(_) => Some("a string set"),
+        AttributeValue::Ns(_) => Some("a number set"),
+        AttributeValue::Bs(_) => Some("a binary set"),
+        AttributeValue::B(_) => Some("binary data"),
+        AttributeValue::L(list) => list.iter().find_map(not_json),
+        AttributeValue::M(map) => map.values().find_map(not_json),
+        _ => None,
+    }
 }
 
 /// Converts an SDK failure into a [`SvcError`], naming `what` when it is a
@@ -329,7 +539,7 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn the_adapter_never_calls_a_write_api() {
+    fn the_only_write_the_adapter_calls_is_one_update_of_an_item() {
         let production = include_str!("ddb.rs")
             .split("#[cfg(test)]")
             .next()
@@ -340,7 +550,6 @@ mod tests {
         );
         let needles = [
             concat!("put", "_item"),
-            concat!("update", "_item"),
             concat!("delete", "_item"),
             concat!("batch", "_write"),
             concat!("transact", "_write"),
@@ -357,6 +566,214 @@ mod tests {
                 "the adapter source mentions {needle}"
             );
         }
+        assert_eq!(
+            production.matches(concat!(".update", "_item()")).count(),
+            1,
+            "the adapter sends exactly one kind of write"
+        );
+        assert!(
+            production.contains(".condition_expression("),
+            "the write is conditional"
+        );
+    }
+
+    fn object(value: Value) -> Item {
+        match value {
+            Value::Object(map) => map,
+            other => panic!("expected an object, got {other}"),
+        }
+    }
+
+    fn a_change(set: Value, remove: &[&str], expect: &[(&str, Option<Value>)]) -> ItemChange {
+        ItemChange {
+            set: object(set),
+            remove: remove.iter().map(|name| (*name).to_owned()).collect(),
+            expect: expect
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), value.clone()))
+                .collect(),
+        }
+    }
+
+    fn stored(attributes: &[(&str, AttributeValue)]) -> HashMap<String, AttributeValue> {
+        attributes
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), value.clone()))
+            .collect()
+    }
+
+    fn s(text: &str) -> AttributeValue {
+        AttributeValue::S(text.to_owned())
+    }
+
+    fn n(text: &str) -> AttributeValue {
+        AttributeValue::N(text.to_owned())
+    }
+
+    const WHAT: &str = "tenants TenantId=acme";
+
+    fn tenant_key() -> Key {
+        object(json!({"TenantId": "acme"}))
+    }
+
+    #[test]
+    fn an_update_names_every_attribute_through_a_placeholder() {
+        let held = stored(&[
+            ("TenantId", s("acme")),
+            ("name", s("old")),
+            ("size", n("3")),
+        ]);
+        let change = a_change(
+            json!({"name": "new", "a b.c": 1}),
+            &["size"],
+            &[
+                ("name", Some(json!("old"))),
+                ("a b.c", None),
+                ("size", Some(json!(3))),
+            ],
+        );
+
+        let request = update_request(WHAT, &tenant_key(), &change, &held).expect("request");
+
+        assert_eq!(request.update, "SET #s0 = :s0, #s1 = :s1 REMOVE #r0");
+        assert_eq!(
+            request.condition,
+            "attribute_exists(#k0) AND attribute_not_exists(#e0) AND #e1 = :e1 AND #e2 = :e2"
+        );
+        let mut names: Vec<(&str, &str)> = request
+            .names
+            .iter()
+            .map(|(placeholder, name)| (placeholder.as_str(), name.as_str()))
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                ("#e0", "a b.c"),
+                ("#e1", "name"),
+                ("#e2", "size"),
+                ("#k0", "TenantId"),
+                ("#r0", "size"),
+                ("#s0", "a b.c"),
+                ("#s1", "name"),
+            ]
+        );
+        assert_eq!(request.values.get(":s0"), Some(&n("1")));
+        assert_eq!(request.values.get(":s1"), Some(&s("new")));
+        // What is expected is compared as it is stored.
+        assert_eq!(request.values.get(":e1"), Some(&s("old")));
+        assert_eq!(request.values.get(":e2"), Some(&n("3")));
+        assert_eq!(request.values.len(), 4);
+    }
+
+    #[test]
+    fn a_refused_condition_is_told_apart_by_what_the_item_holds_now() {
+        let change = a_change(json!({"Tier": "silver"}), &["note"], &[]);
+        let refusal = || SvcError::changed(WHAT);
+
+        // The item has gone.
+        let gone = after_refusal(WHAT, &change, None, refusal()).expect_err("no item");
+        assert!(gone.is_not_found(), "{gone}");
+        // The item already holds what the change writes: an earlier attempt
+        // of this write landed, or someone else made the same change.
+        let done = object(json!({"TenantId": "acme", "Tier": "silver"}));
+        after_refusal(WHAT, &change, Some(&done), refusal()).expect("nothing left to do");
+        // Anything else is a change by someone else.
+        let other = object(json!({"TenantId": "acme", "Tier": "gold", "note": "x"}));
+        let changed = after_refusal(WHAT, &change, Some(&other), refusal()).expect_err("changed");
+        assert!(changed.is_changed(), "{changed}");
+    }
+
+    #[test]
+    fn an_update_that_only_removes_has_no_set_clause() {
+        let held = stored(&[("TenantId", s("acme"))]);
+        let change = a_change(json!({}), &["gone"], &[("gone", None)]);
+
+        let request = update_request(WHAT, &tenant_key(), &change, &held).expect("request");
+
+        assert_eq!(request.update, "REMOVE #r0");
+        assert_eq!(
+            request.condition,
+            "attribute_exists(#k0) AND attribute_not_exists(#e0)"
+        );
+        assert!(request.values.is_empty());
+    }
+
+    #[test]
+    fn an_expectation_the_stored_item_no_longer_meets_is_a_change() {
+        let held = stored(&[("TenantId", s("acme")), ("name", s("old"))]);
+
+        for expect in [
+            ("name", Some(json!("other"))),
+            ("name", None),
+            ("note", Some(json!("x"))),
+        ] {
+            let change = a_change(json!({"name": "new"}), &[], std::slice::from_ref(&expect));
+            let err = update_request(WHAT, &tenant_key(), &change, &held)
+                .expect_err("the item is not as expected");
+            assert!(err.is_changed(), "{expect:?}: {err}");
+            assert!(err.to_string().contains(WHAT), "{err}");
+        }
+    }
+
+    #[test]
+    fn an_expected_number_matches_the_stored_one_whatever_its_spelling() {
+        let held = stored(&[("TenantId", s("acme")), ("rps", n("1.0"))]);
+        let change = a_change(json!({"rps": 2}), &[], &[("rps", Some(json!(1)))]);
+
+        let request = update_request(WHAT, &tenant_key(), &change, &held).expect("request");
+
+        assert_eq!(request.values.get(":e0"), Some(&n("1.0")));
+    }
+
+    #[test]
+    fn a_whole_number_is_written_with_its_own_digits() {
+        let held = stored(&[("TenantId", s("acme"))]);
+        let change = a_change(
+            json!({"big": 9_007_199_254_740_993_u64, "neg": -42}),
+            &[],
+            &[],
+        );
+
+        let request = update_request(WHAT, &tenant_key(), &change, &held).expect("request");
+
+        assert_eq!(request.values.get(":s0"), Some(&n("9007199254740993")));
+        assert_eq!(request.values.get(":s1"), Some(&n("-42")));
+    }
+
+    #[test]
+    fn a_stored_set_is_compared_as_stored_and_cannot_be_set_from_json() {
+        let tags = AttributeValue::Ss(vec!["a".to_owned(), "b".to_owned()]);
+        let nested = AttributeValue::M(
+            [(
+                "raw".to_owned(),
+                AttributeValue::B(Blob::new(b"\x00\x01".to_vec())),
+            )]
+            .into(),
+        );
+        let held = stored(&[
+            ("TenantId", s("acme")),
+            ("tags", tags.clone()),
+            ("blob", nested),
+        ]);
+
+        // Removing it, or expecting it while changing something else, works
+        // on the set itself.
+        let remove = a_change(json!({}), &["tags"], &[("tags", Some(json!(["a", "b"])))]);
+        let request = update_request(WHAT, &tenant_key(), &remove, &held).expect("request");
+        assert_eq!(request.values.get(":e0"), Some(&tags));
+
+        // Writing JSON over it would turn the set into a list.
+        for (name, kind) in [("tags", "a string set"), ("blob", "binary data")] {
+            let change = a_change(json!({name: ["a"]}), &[], &[]);
+            let err = update_request(WHAT, &tenant_key(), &change, &held)
+                .expect_err("JSON cannot say what is stored");
+            assert!(!err.is_changed() && !err.is_not_found(), "{err}");
+            assert!(
+                err.to_string().contains(name) && err.to_string().contains(kind),
+                "{err}"
+            );
+        }
     }
 
     use aws_sdk_dynamodb::primitives::Blob;
@@ -367,7 +784,9 @@ mod tests {
     };
     use serde_json::{Value, json};
     use ss_core::jsonutil;
-    use ss_core::svc::ddb::{AttrType, IndexInfo, Item, Key, Projection, QuerySpec, TableInfo};
+    use ss_core::svc::ddb::{
+        AttrType, IndexInfo, Item, ItemChange, Key, Projection, QuerySpec, TableInfo,
+    };
 
     use super::*;
 
@@ -624,8 +1043,8 @@ mod dynalite {
     use aws_config::{BehaviorVersion, Region, SdkConfig};
     use aws_sdk_dynamodb::config::Credentials;
     use aws_sdk_dynamodb::types::{
-        AttributeDefinition, GlobalSecondaryIndex, KeySchemaElement, KeyType, Projection,
-        ProjectionType, ProvisionedThroughput, ScalarAttributeType, TableStatus,
+        AttributeDefinition, AttributeValue, GlobalSecondaryIndex, KeySchemaElement, KeyType,
+        Projection, ProjectionType, ProvisionedThroughput, ScalarAttributeType, TableStatus,
     };
     use serde_json::{Value, json};
     use ss_core::svc::ddb::contract;
@@ -814,6 +1233,126 @@ mod dynalite {
         create_contract_table(&env, &table).await;
 
         contract::run(&env.port(), &table, &format!("ss-it-missing-{}", env.nanos)).await;
+    }
+
+    #[tokio::test]
+    async fn write_contract_holds_against_dynalite() {
+        let Some(env) = connect().await else { return };
+        let table = format!("ss-it-writes-{}", env.nanos);
+        create_contract_table(&env, &table).await;
+        // Not `run_document_writes`: dynalite compares a map or a list in a
+        // condition by identity, so an update that expects one never goes
+        // through there.
+        contract::run_writes(&env.port(), &table, &format!("ss-it-missing-{}", env.nanos)).await;
+    }
+
+    #[tokio::test]
+    async fn a_condition_the_server_refuses_is_a_change_and_writes_nothing() {
+        let Some(env) = connect().await else { return };
+        let table = format!("ss-it-refused-{}", env.nanos);
+        create_contract_table(&env, &table).await;
+        let port = env.port();
+        let Value::Object(key) = json!({"TenantId": "acme", "Version": "V1"}) else {
+            unreachable!("a JSON object literal is an object")
+        };
+        let key_av = super::key_to_av(&key).expect("key");
+        let what = "the item";
+        let mut held = port
+            .read_native(&table, what, &key_av)
+            .await
+            .expect("read")
+            .expect("the item is there");
+        // The request is built from a reading of the item that is no longer
+        // true, as when someone writes between the read and the write.
+        held.insert("Tier".to_owned(), AttributeValue::S("platinum".to_owned()));
+        let Value::Object(set) = json!({"note": "written"}) else {
+            unreachable!("a JSON object literal is an object")
+        };
+        let change = ss_core::svc::ddb::ItemChange {
+            set,
+            remove: Vec::new(),
+            expect: [("Tier".to_owned(), Some(json!("platinum")))].into(),
+        };
+        let request =
+            super::update_request(what, &key, &change, &held).expect("the older reading agrees");
+
+        let err = port
+            .send_update(&table, what, key_av, request)
+            .await
+            .expect_err("the server finds the item is not as expected");
+
+        assert!(err.is_changed(), "{err}");
+        let item = port.get_item(&table, &key).await.expect("the item");
+        assert_eq!(item["Tier"], json!("gold"));
+        assert!(!item.contains_key("note"), "{item:?}");
+    }
+
+    #[tokio::test]
+    async fn a_stored_set_stays_a_set_when_another_attribute_is_edited() {
+        let Some(env) = connect().await else { return };
+        let table = format!("ss-it-sets-{}", env.nanos);
+        env.raw
+            .create_table()
+            .table_name(&table)
+            .key_schema(key_element("Id", KeyType::Hash))
+            .attribute_definitions(definition("Id", ScalarAttributeType::S))
+            .provisioned_throughput(throughput())
+            .send()
+            .await
+            .expect("create table");
+        wait_active(&env.raw, &table).await;
+        let tags = AttributeValue::Ss(vec!["a".to_owned(), "b".to_owned()]);
+        env.raw
+            .put_item()
+            .table_name(&table)
+            .item("Id", AttributeValue::S("one".to_owned()))
+            .item("tags", tags.clone())
+            .item("note", AttributeValue::S("old".to_owned()))
+            .send()
+            .await
+            .expect("put an item with a set");
+        let Value::Object(key) = json!({"Id": "one"}) else {
+            unreachable!("a JSON object literal is an object")
+        };
+        let port = env.port();
+        let read = port.get_item(&table, &key).await.expect("item");
+
+        let Value::Object(set) = json!({"note": "new"}) else {
+            unreachable!("a JSON object literal is an object")
+        };
+        let change = ss_core::svc::ddb::ItemChange {
+            set,
+            remove: Vec::new(),
+            expect: [
+                ("note".to_owned(), read.get("note").cloned()),
+                ("tags".to_owned(), read.get("tags").cloned()),
+            ]
+            .into(),
+        };
+        port.update_item(&table, &key, &change)
+            .await
+            .expect("the set is as it was read");
+
+        let after = env
+            .raw
+            .get_item()
+            .table_name(&table)
+            .key("Id", AttributeValue::S("one".to_owned()))
+            .consistent_read(true)
+            .send()
+            .await
+            .expect("get")
+            .item
+            .expect("the item is there");
+        assert_eq!(
+            after.get("note"),
+            Some(&AttributeValue::S("new".to_owned()))
+        );
+        assert!(
+            matches!(after.get("tags"), Some(AttributeValue::Ss(set)) if set.len() == 2),
+            "{:?}",
+            after.get("tags")
+        );
     }
 
     #[tokio::test]

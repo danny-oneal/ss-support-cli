@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+#[cfg(test)]
+pub(crate) mod asked;
 pub mod compare;
 mod confirm;
 pub mod ddb;
@@ -48,6 +50,9 @@ pub fn builtin() -> Registry {
         .register(Arc::new(ddb::ItemCompare))
         .expect("builtin operation ids are unique");
     registry
+        .register(Arc::new(ddb::ItemEdit))
+        .expect("builtin operation ids are unique");
+    registry
         .register(Arc::new(ddb::ItemHistory))
         .expect("builtin operation ids are unique");
     registry
@@ -55,6 +60,9 @@ pub fn builtin() -> Registry {
         .expect("builtin operation ids are unique");
     registry
         .register(Arc::new(s3::PrefixAudit))
+        .expect("builtin operation ids are unique");
+    registry
+        .register(Arc::new(s3::RestoreVersion))
         .expect("builtin operation ids are unique");
     registry
         .register(Arc::new(s3::VersionDiff))
@@ -78,9 +86,11 @@ mod tests {
                 "demo.json-diff",
                 "ddb.gsi-consistency",
                 "ddb.item-compare",
+                "ddb.item-edit",
                 "ddb.item-history",
                 "s3.object-inspect",
                 "s3.prefix-audit",
+                "s3.restore-version",
                 "s3.version-diff"
             ]
         );

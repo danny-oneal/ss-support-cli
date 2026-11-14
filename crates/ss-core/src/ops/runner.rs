@@ -312,9 +312,11 @@ impl Runner {
         }
         if matches!(runner_err, Some(RunnerError::DryRun)) {
             self.record(meta, input, Outcome::DryRun, start, None);
-            return Ok(OpResult {
-                views: stopped("dry-run"),
-            });
+            // What the operation was about to change is the point of a dry
+            // run, so it follows the note that the run stopped.
+            let mut views = stopped("dry-run");
+            views.extend(self.state.preview.iter().cloned());
+            return Ok(OpResult { views });
         }
         if find_cause::<GuardError>(&error).is_some_and(GuardError::is_decline) {
             self.record(meta, input, Outcome::Declined, start, Some(&error));

@@ -6,6 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.7] - 2026-11-13
+
+### Added
+- `s3.restore-version`: makes an earlier version of an object its current
+  one again by copying it onto its key, so the version that was current
+  stays in the history. Confirmed with `y`. It refuses a delete marker and
+  any bucket whose versioning is not enabled.
+- `ddb.item-edit`: sets (`--set`, a JSON object) and removes (`--remove`)
+  attributes of one item and leaves the others alone. Confirmed by typing
+  the table name; `--yes` does not cover it.
+- Both show the diff from what is stored to what will be stored before they
+  ask, and neither writes when what it was shown has changed since.
+- `R` on a version in the TUI's S3 browser opens the restore form filled in.
+
+### Changed
+- `--dry-run` shows what the operation was about to change, after the note
+  that it stopped.
+- In the TUI, a warning a run gave (an audit entry that could not be
+  written) stays above the result, and with a failure, instead of
+  disappearing from the status line at the next key.
+- A DynamoDB key holding a number of 2^53 or more is refused by every
+  DynamoDB operation instead of being rounded to the key of another item.
+- The confirmation on the command line no longer passes control characters
+  from the data it shows to the terminal.
+
 ## [0.1.0-alpha.6] - 2026-11-13
 
 ### Added

@@ -9,7 +9,9 @@ use std::fmt::Debug;
 
 use serde_json::{Value, json};
 
-use super::{AttrType, DdbPort, IndexInfo, Item, ItemPage, Key, Projection, QuerySpec, TableInfo};
+use super::{
+    AttrType, DdbPort, IndexInfo, Item, ItemChange, ItemPage, Key, Projection, QuerySpec, TableInfo,
+};
 use crate::svc::SvcError;
 
 /// The key schema the suite expects `table` to have: hash `TenantId` (S),
@@ -219,6 +221,234 @@ pub async fn run(port: &dyn DdbPort, table: &str, missing_table: &str) {
         none.items.is_empty(),
         &none.items,
     );
+}
+
+/// Checks the port's one write against the suite. It changes item `acme`
+/// `V2` of `table`, so call it after [`run`] or on a table of its own.
+/// Everything it expects of the stored item is a string or a number;
+/// [`run_document_writes`] covers maps and lists.
+///
+/// `table` must have been created from [`table_info`] and seeded with
+/// [`seed_items`]; `missing_table` must not exist.
+///
+/// # Panics
+///
+/// Panics, naming the failed check and the observed value, on the first
+/// violation.
+pub async fn run_writes(port: &dyn DdbPort, table: &str, missing_table: &str) {
+    let target = key("acme", "V2");
+    let read = || async { ok("get_item", port.get_item(table, &target).await) };
+    let before = read().await;
+
+    let set = change(
+        json!({"limits": {"rps": 75, "burst": 100}, "note": "raised", "weight": 75}),
+        &[],
+        &[("Tier", before.get("Tier").cloned()), ("note", None)],
+    );
+    ok(
+        "update_item sets attributes",
+        port.update_item(table, &target, &set).await,
+    );
+    let after_set = read().await;
+    check_eq(
+        "update_item wrote the new attributes",
+        &(after_set.get("limits"), after_set.get("note")),
+        &(
+            Some(&json!({"rps": 75, "burst": 100})),
+            Some(&json!("raised")),
+        ),
+    );
+    check_eq(
+        "update_item left the other attributes alone",
+        &(
+            after_set.get("Tier"),
+            after_set.get("TenantId"),
+            after_set.get("Version"),
+        ),
+        &(
+            Some(&json!("gold")),
+            Some(&json!("acme")),
+            Some(&json!("V2")),
+        ),
+    );
+
+    // The expectation spells a number differently from how it was written.
+    let remove = change(
+        json!({}),
+        &["note"],
+        &[
+            ("note", Some(json!("raised"))),
+            ("weight", Some(json!(75.0))),
+        ],
+    );
+    ok(
+        "update_item removes an attribute",
+        port.update_item(table, &target, &remove).await,
+    );
+    let after_remove = read().await;
+    check(
+        "update_item removed the attribute",
+        !after_remove.contains_key("note"),
+        &after_remove,
+    );
+
+    for (name, expect) in [
+        ("a value that differs", ("Tier", Some(json!("platinum")))),
+        ("an attribute expected absent that is there", ("Tier", None)),
+        (
+            "an attribute expected that is absent",
+            ("note", Some(json!("raised"))),
+        ),
+    ] {
+        let stale = change(json!({"Tier": "silver"}), &[], &[expect]);
+        match port.update_item(table, &target, &stale).await {
+            Err(e) if e.is_changed() => {}
+            other => {
+                panic!("contract: update_item with {name} should report a change, got {other:?}")
+            }
+        }
+    }
+    check_eq(
+        "a refused update_item writes nothing",
+        &read().await,
+        &after_remove,
+    );
+
+    let harmless = change(json!({"note": "x"}), &[], &[]);
+    not_found(
+        "update_item of a missing item",
+        port.update_item(table, &key("acme", "V9"), &harmless).await,
+    );
+    not_found(
+        "get_item after update_item of a missing item",
+        port.get_item(table, &key("acme", "V9")).await,
+    );
+    not_found(
+        "update_item in a missing table",
+        port.update_item(missing_table, &target, &harmless).await,
+    );
+    for (name, bad) in [
+        (
+            "a key attribute to set",
+            change(json!({"Version": "V7"}), &[], &[]),
+        ),
+        (
+            "a key attribute to remove",
+            change(json!({}), &["TenantId"], &[]),
+        ),
+        ("nothing to set or remove", change(json!({}), &[], &[])),
+    ] {
+        check(
+            &format!("update_item with {name} is refused"),
+            port.update_item(table, &target, &bad).await.is_err(),
+            &bad,
+        );
+    }
+    check_eq(
+        "a refused update_item writes nothing",
+        &read().await,
+        &after_remove,
+    );
+}
+
+/// Checks the port's one write where what is expected of the stored item is
+/// a map or a list. It changes item `acme` `V1` of `table`, which must have
+/// been created from [`table_info`] and seeded with [`seed_items`].
+///
+/// This needs a store that compares maps and lists in a condition by their
+/// content, as DynamoDB does. dynalite compares them by identity and never
+/// finds two equal, so this part cannot be run against it.
+///
+/// # Panics
+///
+/// Panics, naming the failed check and the observed value, on the first
+/// violation.
+pub async fn run_document_writes(port: &dyn DdbPort, table: &str) {
+    let target = key("acme", "V1");
+    let read = || async { ok("get_item", port.get_item(table, &target).await) };
+
+    // The map as it was read, its members in another order and one number
+    // spelled differently.
+    let on_a_map = change(
+        json!({"tags": ["a", "b"]}),
+        &[],
+        &[
+            ("limits", Some(json!({"burst": 200.0, "rps": 100}))),
+            ("tags", None),
+        ],
+    );
+    ok(
+        "update_item expecting a map",
+        port.update_item(table, &target, &on_a_map).await,
+    );
+    check_eq(
+        "update_item expecting a map wrote the list",
+        &read().await.get("tags"),
+        &Some(&json!(["a", "b"])),
+    );
+
+    let on_a_list = change(
+        json!({"limits": {"rps": 150}}),
+        &[],
+        &[
+            ("tags", Some(json!(["a", "b"]))),
+            ("limits", Some(json!({"rps": 100, "burst": 200}))),
+        ],
+    );
+    ok(
+        "update_item expecting a list",
+        port.update_item(table, &target, &on_a_list).await,
+    );
+    let after = read().await;
+    check_eq(
+        "update_item expecting a list replaced the whole map",
+        &after.get("limits"),
+        &Some(&json!({"rps": 150})),
+    );
+
+    for (name, expect) in [
+        (
+            "a map with a member that differs",
+            ("limits", Some(json!({"rps": 151}))),
+        ),
+        ("a map with a member missing", ("limits", Some(json!({})))),
+        (
+            "a map with a member too many",
+            ("limits", Some(json!({"rps": 150, "burst": 200}))),
+        ),
+        ("a list in another order", ("tags", Some(json!(["b", "a"])))),
+        (
+            "a list with an element missing",
+            ("tags", Some(json!(["a"]))),
+        ),
+    ] {
+        let stale = change(json!({"Tier": "silver"}), &[], &[expect]);
+        match port.update_item(table, &target, &stale).await {
+            Err(e) if e.is_changed() => {}
+            other => {
+                panic!("contract: update_item with {name} should report a change, got {other:?}")
+            }
+        }
+    }
+    check_eq(
+        "a refused update_item writes nothing",
+        &read().await,
+        &after,
+    );
+}
+
+fn change(set: Value, remove: &[&str], expect: &[(&str, Option<Value>)]) -> ItemChange {
+    let Value::Object(set) = set else {
+        unreachable!("the attributes to set are a JSON object literal")
+    };
+    ItemChange {
+        set,
+        remove: remove.iter().map(|name| (*name).to_owned()).collect(),
+        expect: expect
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), value.clone()))
+            .collect(),
+    }
 }
 
 fn key(tenant: &str, version: &str) -> Key {

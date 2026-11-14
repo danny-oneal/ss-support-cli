@@ -1,4 +1,4 @@
-//! The read-only S3 port and the types it exchanges.
+//! The S3 port and the types it exchanges.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -48,6 +48,28 @@ pub struct ObjectMeta {
     pub modified: Option<DateTime<Utc>>,
     /// Entity tag.
     pub etag: String,
+}
+
+/// Whether a bucket keeps the versions of its objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Versioning {
+    /// Every write adds a version.
+    Enabled,
+    /// Versions written earlier are kept, but a write now takes the place
+    /// of the version that has no id.
+    Suspended,
+    /// The bucket has never kept versions.
+    Off,
+}
+
+impl std::fmt::Display for Versioning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Enabled => "enabled",
+            Self::Suspended => "suspended",
+            Self::Off => "off",
+        })
+    }
 }
 
 /// One page of a prefix listing.
@@ -105,11 +127,19 @@ impl Object {
     }
 }
 
-/// Read-only access to S3.
+/// Access to S3: reads, and one write, which makes an earlier version of an
+/// object its current one.
 #[async_trait]
 pub trait S3Port: Send + Sync {
     /// Every bucket visible to the caller.
     async fn list_buckets(&self) -> Result<Vec<Bucket>, SvcError>;
+
+    /// Whether `bucket` keeps the versions of its objects.
+    ///
+    /// # Errors
+    ///
+    /// [`SvcError::NotFound`] when the bucket does not exist.
+    async fn versioning(&self, bucket: &str) -> Result<Versioning, SvcError>;
 
     /// One page of the keys and common prefixes under `prefix`, resuming
     /// after `token` when given.
@@ -130,6 +160,24 @@ pub trait S3Port: Send + Sync {
 
     /// The metadata of the current version of `key`.
     async fn head(&self, bucket: &str, key: &str) -> Result<ObjectMeta, SvcError>;
+
+    /// Makes the version `version_id` of `key` the current one by copying
+    /// it onto the same key on the server; its content, content type, and
+    /// user metadata are copied with it. Returns the id of the version the
+    /// copy created, or [`CURRENT`] when the bucket does not keep versions.
+    ///
+    /// # Errors
+    ///
+    /// [`SvcError::NotFound`] when the bucket, key, or version does not
+    /// exist. An empty id, [`CURRENT`], and the id of a delete marker are
+    /// refused: only a version that holds content and is named by its own
+    /// id can be copied.
+    async fn copy_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> Result<String, SvcError>;
 }
 
 #[cfg(test)]
