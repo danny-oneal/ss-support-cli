@@ -670,6 +670,16 @@ mod tests {
             self.check()?;
             self.inner.head(bucket, key).await
         }
+
+        async fn copy_version(
+            &self,
+            bucket: &str,
+            key: &str,
+            version_id: &str,
+        ) -> Result<String, SvcError> {
+            self.check()?;
+            self.inner.copy_version(bucket, key, version_id).await
+        }
     }
 
     #[tokio::test]

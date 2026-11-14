@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use super::{S3Port, Version, is_current};
+use super::{CURRENT, S3Port, Version, is_current};
 use crate::svc::SvcError;
 
 #[cfg(test)]
@@ -141,6 +141,113 @@ pub async fn run(fx: &Fixture<'_>) {
     get_version(fx).await;
     head(fx).await;
     not_found(fx).await;
+}
+
+/// Runs the checks of the port's one write against `fx`. They change the
+/// history of the fixture's key, so call this after [`run`] or on a fixture
+/// of its own.
+pub async fn run_writes(fx: &Fixture<'_>) {
+    let (port, bucket, key) = (fx.port, fx.bucket.as_str(), fx.key.as_str());
+    let history = || async {
+        must(
+            "copy_version",
+            &format!("list_versions({bucket:?}, {key:?})"),
+            port.list_versions(bucket, key).await,
+        )
+    };
+    let before = history().await;
+    let (source, source_body) = match (fx.version_ids.first(), fx.bodies.first()) {
+        (Some(id), Some(body)) => (id.as_str(), body.as_str()),
+        _ => panic!("fixture: need at least one body and its version id"),
+    };
+
+    let created = must(
+        "copy_version",
+        &format!("copy_version({bucket:?}, {key:?}, {source:?})"),
+        port.copy_version(bucket, key, source).await,
+    );
+    assert!(
+        !is_current(&created),
+        "copy_version: a bucket that keeps versions returns the id of the new version, got {created:?}"
+    );
+    assert!(
+        before.iter().all(|v| v.id != created),
+        "copy_version: the returned id {created:?} already named a version"
+    );
+
+    let after = history().await;
+    assert_eq!(
+        after.len(),
+        before.len() + 1,
+        "copy_version: the history has one more entry; before {:?}, after {:?}",
+        before.iter().map(|v| &v.id).collect::<Vec<_>>(),
+        after.iter().map(|v| &v.id).collect::<Vec<_>>()
+    );
+    let latest: Vec<&Version> = after.iter().filter(|v| v.is_latest).collect();
+    assert!(
+        matches!(latest.as_slice(), [v] if v.id == created && !v.is_delete),
+        "copy_version: the new version {created:?} is the one latest entry, got {latest:?}"
+    );
+    assert_eq!(
+        after.first().map(|v| v.id.as_str()),
+        Some(created.as_str()),
+        "copy_version: the new version is listed first"
+    );
+
+    let current = must(
+        "copy_version",
+        &format!("get_version({bucket:?}, {key:?}, current)"),
+        port.get_version(bucket, key, CURRENT).await,
+    );
+    assert_eq!(
+        (
+            String::from_utf8_lossy(&current.body).as_ref(),
+            current.version_id.as_str()
+        ),
+        (source_body, created.as_str()),
+        "copy_version: the current version holds the copied body under the new id"
+    );
+    for (id, body) in fx.version_ids.iter().zip(&fx.bodies) {
+        let kept = must(
+            "copy_version",
+            &format!("get_version({bucket:?}, {key:?}, {id:?})"),
+            port.get_version(bucket, key, id).await,
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&kept.body),
+            body.as_str(),
+            "copy_version: version {id:?} still holds its body"
+        );
+    }
+
+    let missing = format!("{key}.does-not-exist");
+    let nope = format!("{bucket}-does-not-exist");
+    must_be_not_found(
+        &format!("copy_version({bucket:?}, {key:?}, an unknown version id)"),
+        port.copy_version(bucket, key, "definitely-not-a-version-id")
+            .await,
+    );
+    must_be_not_found(
+        &format!("copy_version({bucket:?}, {missing:?}, {source:?})"),
+        port.copy_version(bucket, &missing, source).await,
+    );
+    must_be_not_found(
+        &format!("copy_version({nope:?}, {key:?}, {source:?})"),
+        port.copy_version(&nope, key, source).await,
+    );
+    let refused = ["", CURRENT]
+        .into_iter()
+        .chain(fx.delete_marker_ids.iter().map(String::as_str));
+    for id in refused {
+        if let Ok(created) = port.copy_version(bucket, key, id).await {
+            panic!("copy_version: copying {id:?} must be refused, but it created {created:?}");
+        }
+    }
+    assert_eq!(
+        history().await.len(),
+        after.len(),
+        "copy_version: a refused or failed copy writes nothing"
+    );
 }
 
 fn newest_body<'a>(fx: &'a Fixture<'_>) -> &'a str {
@@ -444,5 +551,14 @@ mod tests {
     async fn a_listing_that_ignores_the_page_size_is_reported() {
         let (fake, ids, marker) = seeded_fake();
         run(&fixture(&fake, &fake, ids, marker)).await;
+    }
+
+    #[tokio::test]
+    async fn fake_satisfies_the_write_contract() {
+        let (fake, ids, marker) = seeded_fake();
+        let paged = fake.paged(2);
+        let fx = fixture(&fake, &paged, ids, marker);
+        run(&fx).await;
+        run_writes(&fx).await;
     }
 }

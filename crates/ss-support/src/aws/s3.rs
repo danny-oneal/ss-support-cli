@@ -2,9 +2,11 @@
 //!
 //! SDK not-found shapes (missing bucket, key or version) become
 //! [`SvcError::NotFound`]; every other SDK failure is kept whole as
-//! [`SvcError::Other`].
+//! [`SvcError::Other`]. The one write is a server-side copy of a version
+//! onto its own key.
 
 use std::cmp::Reverse;
+use std::fmt::Write as _;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -14,7 +16,7 @@ use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::primitives::DateTime as SdkDateTime;
 use chrono::{DateTime, Utc};
 use ss_core::svc::SvcError;
-use ss_core::svc::s3::{Bucket, Object, ObjectMeta, Page, S3Port, Version, is_current};
+use ss_core::svc::s3::{Bucket, CURRENT, Object, ObjectMeta, Page, S3Port, Version, is_current};
 
 /// The default cap on an object body read into memory: 32 MiB.
 pub(crate) const MAX_BODY: u64 = 32 << 20;
@@ -274,6 +276,61 @@ impl S3Port for AwsS3 {
             etag: out.e_tag().unwrap_or_default().to_owned(),
         })
     }
+
+    async fn copy_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> Result<String, SvcError> {
+        if is_current(version_id) {
+            return Err(SvcError::Other(anyhow!(
+                "{bucket}/{key}: the version to copy must be named by its own id"
+            )));
+        }
+        let what = format!("{bucket}/{key}@{version_id}");
+        let out = self
+            .client
+            .copy_object()
+            .bucket(bucket)
+            .key(key)
+            .copy_source(copy_source(bucket, key, version_id))
+            .send()
+            .await
+            .map_err(|e| svc_error(&what, e, true))?;
+        Ok(match out.version_id() {
+            Some(id) if !id.is_empty() => id.to_owned(),
+            _ => CURRENT.to_owned(),
+        })
+    }
+}
+
+/// The copy source that names one version of an object. Every byte of the
+/// key and of the version id that is not an unreserved URL character is
+/// percent-encoded, except the slashes of the key.
+fn copy_source(bucket: &str, key: &str, version_id: &str) -> String {
+    let mut source = format!("{bucket}/");
+    percent_encode(&mut source, key, true);
+    source.push_str("?versionId=");
+    percent_encode(&mut source, version_id, false);
+    source
+}
+
+/// Appends `text` to `out`, percent-encoding every byte that is not an
+/// unreserved URL character; a slash is kept when `keep_slash` is set.
+fn percent_encode(out: &mut String, text: &str, keep_slash: bool) {
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(char::from(byte));
+            }
+            b'/' if keep_slash => out.push('/'),
+            _ => {
+                // Writing to a string cannot fail.
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
 }
 
 /// Converts an SDK failure into a [`SvcError`], naming `what` when it is a
@@ -349,6 +406,18 @@ fn size(n: Option<i64>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_copy_source_encodes_everything_but_unreserved_characters_and_the_slashes_of_the_key() {
+        assert_eq!(
+            copy_source("ss-config", "cfg/a b+c?d#e%f/日本.json", "v 1/2"),
+            "ss-config/cfg/a%20b%2Bc%3Fd%23e%25f/%E6%97%A5%E6%9C%AC.json?versionId=v%201%2F2"
+        );
+        assert_eq!(
+            copy_source("b", "plain-key_1.json~", "3HL4kqtJlcpXroDTDmJ.rioz_Rb"),
+            "b/plain-key_1.json~?versionId=3HL4kqtJlcpXroDTDmJ.rioz_Rb"
+        );
+    }
 
     #[test]
     fn classify_not_found_shapes() {
@@ -436,6 +505,8 @@ mod minio {
 
     /// A fresh versioned bucket holding the contract fixture.
     struct Seeded {
+        /// A client that talks to the endpoint directly.
+        raw: aws_sdk_s3::Client,
         cfg: SdkConfig,
         endpoint: String,
         bucket: String,
@@ -454,6 +525,41 @@ mod minio {
                     ..opts
                 },
             )
+        }
+
+        /// The contract fixture over this bucket.
+        fn fixture<'a>(&self, port: &'a AwsS3, paged: &'a AwsS3) -> Fixture<'a> {
+            Fixture {
+                port,
+                bucket: self.bucket.clone(),
+                key: KEY.into(),
+                bodies: BODIES.map(String::from).to_vec(),
+                version_ids: self.ids.clone(),
+                delete_marker_ids: vec![self.marker.clone()],
+                paging: Paging {
+                    port: paged,
+                    prefix: PAGE_PREFIX.into(),
+                    want_keys: PAGE_NAMES
+                        .map(|name| format!("{PAGE_PREFIX}{name}.json"))
+                        .to_vec(),
+                    page_size: 2,
+                },
+            }
+        }
+
+        /// Writes `body` to `key` and returns the id of the version made.
+        async fn put(&self, key: &str, body: &'static str) -> String {
+            self.raw
+                .put_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .body(ByteStream::from_static(body.as_bytes()))
+                .send()
+                .await
+                .expect("put")
+                .version_id()
+                .expect("put returns a version id")
+                .to_owned()
         }
     }
 
@@ -548,6 +654,7 @@ mod minio {
         }
 
         Some(Seeded {
+            raw,
             cfg,
             endpoint,
             bucket,
@@ -564,23 +671,85 @@ mod minio {
             page_size: Some(2),
             ..Options::default()
         });
-        contract::run(&Fixture {
-            port: &port,
-            bucket: s.bucket.clone(),
-            key: KEY.into(),
-            bodies: BODIES.map(String::from).to_vec(),
-            version_ids: s.ids.clone(),
-            delete_marker_ids: vec![s.marker.clone()],
-            paging: Paging {
-                port: &paged,
-                prefix: PAGE_PREFIX.into(),
-                want_keys: PAGE_NAMES
-                    .map(|name| format!("{PAGE_PREFIX}{name}.json"))
-                    .to_vec(),
-                page_size: 2,
-            },
-        })
-        .await;
+        contract::run(&s.fixture(&port, &paged)).await;
+    }
+
+    #[tokio::test]
+    async fn write_contract_holds_against_s3() {
+        let Some(s) = seed().await else { return };
+        let port = s.port(Options::default());
+        let paged = s.port(Options {
+            page_size: Some(2),
+            ..Options::default()
+        });
+        contract::run_writes(&s.fixture(&port, &paged)).await;
+    }
+
+    #[tokio::test]
+    async fn a_copy_keeps_the_content_type_and_user_metadata() {
+        let Some(s) = seed().await else { return };
+        let key = "cfg/typed.json";
+        let first = s
+            .raw
+            .put_object()
+            .bucket(&s.bucket)
+            .key(key)
+            .content_type("application/x-ss-support-test")
+            .metadata("owner", "support")
+            .body(ByteStream::from_static(b"{\"n\":1}"))
+            .send()
+            .await
+            .expect("put with metadata")
+            .version_id()
+            .expect("put returns a version id")
+            .to_owned();
+        s.put(key, "{\"n\":2}").await;
+
+        let created = s
+            .port(Options::default())
+            .copy_version(&s.bucket, key, &first)
+            .await
+            .expect("copy");
+
+        let head = s
+            .raw
+            .head_object()
+            .bucket(&s.bucket)
+            .key(key)
+            .send()
+            .await
+            .expect("head");
+        assert_eq!(head.version_id(), Some(created.as_str()));
+        assert_eq!(head.content_type(), Some("application/x-ss-support-test"));
+        assert_eq!(
+            head.metadata()
+                .and_then(|m| m.get("owner"))
+                .map(String::as_str),
+            Some("support")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_key_with_awkward_characters_can_be_copied() {
+        let Some(s) = seed().await else { return };
+        let key = "cfg/a b+c?d#e%f/日本.json";
+        let first = s.put(key, "first").await;
+        s.put(key, "second").await;
+        let port = s.port(Options::default());
+
+        port.copy_version(&s.bucket, key, &first)
+            .await
+            .expect("copy");
+
+        let current = port.get_version(&s.bucket, key, "").await.expect("current");
+        assert_eq!(current.body, b"first");
+        assert_eq!(
+            port.list_versions(&s.bucket, key)
+                .await
+                .expect("history")
+                .len(),
+            3
+        );
     }
 
     #[tokio::test]
