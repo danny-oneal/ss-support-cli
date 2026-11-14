@@ -1049,3 +1049,19 @@ async fn bash_completes_subcommands_operations_and_their_flags() {
         ["show"]
     );
 }
+
+#[test]
+fn version_is_one_line_that_starts_with_the_package_version() {
+    let services = Services::isolated(Path::new("/nonexistent"));
+    let shown = ss_support::parse_from(&services.registry, ["ss-support", "--version"])
+        .expect_err("clap answers --version itself");
+
+    assert_eq!(shown.kind(), clap::error::ErrorKind::DisplayVersion);
+    assert_eq!(shown.exit_code(), 0);
+    let text = shown.to_string();
+    assert_eq!(text, format!("ss-support {}\n", ss_support::version()));
+    assert!(
+        text.starts_with(&format!("ss-support {}", env!("CARGO_PKG_VERSION"))),
+        "{text}"
+    );
+}

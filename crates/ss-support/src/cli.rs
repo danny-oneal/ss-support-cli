@@ -232,7 +232,8 @@ impl Cli {
 /// The full clap tree: [`Cli`] with one `run` subcommand per registered
 /// operation.
 pub fn command(registry: &Registry) -> clap::Command {
-    Cli::command().mut_subcommand("run", |run| {
+    let cli = Cli::command().version(crate::version::version());
+    cli.mut_subcommand("run", |run| {
         let mut run = run.subcommand_required(true);
         for op in registry.all() {
             run = run.subcommand(dynamic::op_command(op.as_ref()));
