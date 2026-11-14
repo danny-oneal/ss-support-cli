@@ -162,7 +162,12 @@ mod tests {
                         assert!(extra.is_none(), "a message followed the result");
                         return (events, *result);
                     }
-                    Msg::Key(_) | Msg::Paste(_) | Msg::Resize | Msg::Loaded(..) => {
+                    Msg::Key(_)
+                    | Msg::Paste(_)
+                    | Msg::Resize
+                    | Msg::Loaded(..)
+                    | Msg::Lines(..)
+                    | Msg::StreamEnded(..) => {
                         panic!("a run never reports input or load messages")
                     }
                 }

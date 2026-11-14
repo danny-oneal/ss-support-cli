@@ -5,20 +5,23 @@
 //! state. A missing resource becomes [`SvcError::NotFound`]; every other
 //! failure is reported with kubectl's own message. Each child is spawned with
 //! `kill_on_drop`, so dropping a call or a log receiver never leaves kubectl
-//! running.
+//! running, and each is tracked until it ends, so a process that is about to
+//! exit can stop the ones still running with [`stop_children`].
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
-use std::process::Stdio;
-use std::sync::Arc;
+use std::process::{ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::anyhow;
 use async_trait::async_trait;
 use ss_core::config::Environment;
 use ss_core::svc::SvcError;
-use ss_core::svc::kubectl::{KubectlPort, LOG_BUFFER, LOG_TAIL};
+use ss_core::svc::kubectl::{KubectlPort, LOG_BUFFER, LOG_LINE_MAX, LOG_TAIL};
 use ss_core::vars::Vars;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::sync::mpsc;
 
@@ -29,6 +32,59 @@ pub(crate) const MAX_OUTPUT: usize = 32 << 20;
 
 /// How much of a child's stderr is kept for error messages: the last 64 KiB.
 const STDERR_TAIL: usize = 64 << 10;
+
+/// Every kubectl process started and not yet seen to end.
+static RUNNING: Mutex<BTreeMap<u64, Child>> = Mutex::new(BTreeMap::new());
+
+/// The key the next process is tracked under.
+static NEXT_RUNNING: AtomicU64 = AtomicU64::new(0);
+
+fn running() -> MutexGuard<'static, BTreeMap<u64, Child>> {
+    // Nothing done under the lock can leave the map half-changed.
+    RUNNING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A kubectl process that is tracked while it runs. Dropping it stops the
+/// process.
+struct Running(u64);
+
+impl Running {
+    fn track(child: Child) -> Self {
+        let key = NEXT_RUNNING.fetch_add(1, Ordering::Relaxed);
+        running().insert(key, child);
+        Running(key)
+    }
+
+    /// Waits for the process to end by itself and returns how it ended. It
+    /// is no longer tracked while this waits, which is after its output has
+    /// ended.
+    async fn wait(self) -> io::Result<ExitStatus> {
+        let child = running().remove(&self.0);
+        match child {
+            Some(mut child) => child.wait().await,
+            None => Err(io::Error::other("the process is no longer tracked")),
+        }
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let child = running().remove(&self.0);
+        // Dropped outside the lock; this is what kills a process that is
+        // still running.
+        drop(child);
+    }
+}
+
+/// Stops every kubectl process started here that is still running. It is
+/// for a path that is about to end the process: destructors do not run on
+/// exit, and a task that would have stopped its kubectl may never run again.
+pub(crate) fn stop_children() {
+    for child in running().values_mut() {
+        // A process that has already ended has nothing left to stop.
+        let _ = child.start_kill();
+    }
+}
 
 /// How [`KubectlExec`] runs kubectl.
 #[derive(Debug, Clone)]
@@ -78,7 +134,7 @@ impl KubectlExec {
     }
 
     /// Spawns kubectl with piped output, no stdin, and `kill_on_drop` set.
-    /// Returns the child with its stdout and stderr handles taken.
+    /// Returns the tracked child and its stdout and stderr handles.
     ///
     /// # Errors
     ///
@@ -88,7 +144,7 @@ impl KubectlExec {
         &self,
         namespace: &str,
         rest: &[&str],
-    ) -> Result<(Child, ChildStdout, ChildStderr), SvcError> {
+    ) -> Result<(Running, ChildStdout, ChildStderr), SvcError> {
         let mut child = Command::new(&self.opts.binary)
             .args(self.args(namespace, rest))
             .stdin(Stdio::null())
@@ -103,7 +159,7 @@ impl KubectlExec {
                 rest.join(" ")
             )));
         };
-        Ok((child, stdout, stderr))
+        Ok((Running::track(child), stdout, stderr))
     }
 
     fn spawn_error(&self, err: &io::Error, rest: &[&str]) -> SvcError {
@@ -125,7 +181,7 @@ impl KubectlExec {
     /// kubectl's own error message.
     async fn run_get(&self, namespace: &str, rest: &[&str]) -> Result<Vec<u8>, SvcError> {
         let shown = rest.join(" ");
-        let (mut child, mut stdout, mut stderr) = self.spawn(namespace, rest)?;
+        let (child, mut stdout, mut stderr) = self.spawn(namespace, rest)?;
         let max = self.opts.max_output;
         let read_out = async {
             let mut body = Vec::new();
@@ -297,28 +353,26 @@ impl KubectlPort for KubectlExec {
 /// with a failure and wrote to stderr, the last line sent is `error: {line}`,
 /// where `line` is the last non-empty line of stderr.
 async fn pump_logs(
-    mut child: Child,
+    child: Running,
     stdout: ChildStdout,
     stderr: ChildStderr,
     tx: mpsc::Sender<String>,
 ) {
     // Drain stderr concurrently so a chatty kubectl never blocks on a full pipe.
     let errors = tokio::spawn(read_tail(stderr, STDERR_TAIL));
-    let mut reader = BufReader::new(stdout);
-    let mut line = Vec::new();
+    let mut lines = Lines::new(BufReader::new(stdout), LOG_LINE_MAX);
     loop {
-        line.clear();
-        let read = tokio::select! {
+        let next = tokio::select! {
             () = tx.closed() => {
                 errors.abort();
                 return;
             }
-            read = reader.read_until(b'\n', &mut line) => read,
+            next = lines.next() => next,
         };
-        if !matches!(read, Ok(n) if n > 0) {
+        let Ok(Some(line)) = next else {
             break;
-        }
-        if tx.send(line_text(&line)).await.is_err() {
+        };
+        if tx.send(line).await.is_err() {
             errors.abort();
             return;
         }
@@ -332,10 +386,95 @@ async fn pump_logs(
     }
 }
 
-/// One log line without its line terminator; invalid UTF-8 is replaced.
-fn line_text(raw: &[u8]) -> String {
-    let raw = raw.strip_suffix(b"\n").unwrap_or(raw);
-    let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
+/// Splits what a reader produces into lines of at most `max` bytes, so that
+/// output with no line break in it is never held in memory whole.
+struct Lines<R> {
+    reader: R,
+    max: usize,
+    /// The start of a character whose other bytes had not been read when a
+    /// line was cut.
+    carry: Vec<u8>,
+    /// Whether the last line returned was cut before its line break.
+    cut: bool,
+}
+
+impl<R: AsyncBufRead + Unpin> Lines<R> {
+    fn new(reader: R, max: usize) -> Self {
+        Lines {
+            reader,
+            max,
+            carry: Vec::new(),
+            cut: false,
+        }
+    }
+
+    /// The next line without its line break, or `None` at the end of the
+    /// input. A line longer than the limit is returned in pieces of at most
+    /// that many bytes, none ending inside a UTF-8 character. Invalid UTF-8
+    /// is replaced.
+    ///
+    /// # Errors
+    ///
+    /// A failure to read.
+    async fn next(&mut self) -> io::Result<Option<String>> {
+        let mut line = std::mem::take(&mut self.carry);
+        loop {
+            let available = self.reader.fill_buf().await?;
+            if available.is_empty() {
+                return Ok((!line.is_empty()).then(|| text_of(&line)));
+            }
+            let room = self.max.saturating_sub(line.len()).max(1);
+            let window = &available[..available.len().min(room)];
+            if let Some(end) = window.iter().position(|&byte| byte == b'\n') {
+                line.extend_from_slice(&window[..end]);
+                self.reader.consume(end + 1);
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                // The line break of a line cut exactly at the limit ends
+                // that line; it is not an empty line after it.
+                if std::mem::take(&mut self.cut) && line.is_empty() {
+                    continue;
+                }
+                return Ok(Some(text_of(&line)));
+            }
+            let taken = window.len();
+            line.extend_from_slice(window);
+            self.reader.consume(taken);
+            if line.len() >= self.max {
+                let whole = line.len() - incomplete_tail(&line);
+                // A piece that would be empty is returned as it is, so the
+                // split always moves on.
+                if whole > 0 {
+                    self.carry = line.split_off(whole);
+                }
+                self.cut = true;
+                return Ok(Some(text_of(&line)));
+            }
+        }
+    }
+}
+
+/// How many bytes at the end of `bytes` start a UTF-8 character whose other
+/// bytes are not there.
+fn incomplete_tail(bytes: &[u8]) -> usize {
+    for (index, byte) in bytes.iter().rev().take(3).enumerate() {
+        let needed = match byte {
+            // A byte from the middle of a character: look further back.
+            0x80..=0xBF => continue,
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF7 => 4,
+            _ => 1,
+        };
+        let have = index + 1;
+        return if needed > have { have } else { 0 };
+    }
+    0
+}
+
+/// `raw` as text; invalid UTF-8 is replaced.
+fn text_of(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).into_owned()
 }
 
@@ -751,6 +890,36 @@ exit 1"#;
         assert_gone(&pid).await;
     }
 
+    // Nothing else is spawned here, so only the adapter itself can have
+    // collected the process it killed.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_stopped_log_stream_is_reaped_without_another_kubectl_call() {
+        let _serial = serial().await;
+        let dir = TempDir::new().expect("tempdir");
+        let bin = stub(
+            &dir,
+            r#"trap '' PIPE; echo $$ > "$0.pid"; while true; do echo tick; sleep 0.05; done"#,
+        );
+        let mut rx = exec(&bin)
+            .logs("default", "pod-a", true)
+            .await
+            .expect("start stream");
+        assert_eq!(rx.recv().await.as_deref(), Some("tick"));
+        let pid = pid_of(&bin).await;
+
+        drop(rx);
+
+        let entry = PathBuf::from(format!("/proc/{pid}"));
+        for _ in 0..100 {
+            if !entry.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("process {pid} was stopped but is still in the process table");
+    }
+
     /// A script that writes a marked first line, over 64 KiB of filler, and a
     /// marked last line to stderr, then fails.
     const CHATTY_FAILURE: &str = r#"echo FIRST-LINE-MARKER >&2
@@ -970,5 +1139,143 @@ exit 1"#;
             // `call` is dropped here, mid-flight.
         };
         assert_gone(&pid).await;
+    }
+
+    /// Every line `input` splits into when no line may exceed `max` bytes.
+    async fn split(input: &[u8], max: usize) -> Vec<String> {
+        let mut lines = Lines::new(input, max);
+        let mut out = Vec::new();
+        while let Some(line) = lines.next().await.expect("reading from memory") {
+            out.push(line);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn a_line_longer_than_the_limit_arrives_in_pieces() {
+        assert_eq!(
+            split(b"abcdefghij\nkl\n", 4).await,
+            ["abcd", "efgh", "ij", "kl"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_line_of_exactly_the_limit_is_one_line() {
+        assert_eq!(
+            split(b"abcd\nefgh\r\n\nij", 4).await,
+            ["abcd", "efgh", "", "ij"]
+        );
+    }
+
+    #[tokio::test]
+    async fn line_breaks_of_either_kind_are_removed() {
+        assert_eq!(split(b"a\r\nb\n\nc", 16).await, ["a", "b", "", "c"]);
+    }
+
+    #[tokio::test]
+    async fn a_piece_never_ends_inside_a_character() {
+        assert_eq!(split("aé€😀b".as_bytes(), 4).await, ["aé", "€", "😀", "b"]);
+    }
+
+    #[tokio::test]
+    async fn bytes_that_are_not_text_are_split_at_the_limit_all_the_same() {
+        let pieces = split(&[0xFF; 10], 4).await;
+
+        assert_eq!(
+            pieces.iter().map(|p| p.chars().count()).collect::<Vec<_>>(),
+            [4, 4, 2]
+        );
+        // A character that never completes does not hold the split back.
+        assert_eq!(split(&[0xE2, 0x82, 0xE2, 0x82], 2).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_log_without_line_breaks_arrives_in_bounded_lines() {
+        let _serial = serial().await;
+        let dir = TempDir::new().expect("tempdir");
+        let bin = stub(&dir, r"head -c 100000 /dev/zero | tr '\0' x");
+        let rx = exec(&bin)
+            .logs("default", "pod-a", false)
+            .await
+            .expect("start stream");
+
+        let lines = collect(rx).await;
+
+        assert!(lines.len() > 1, "{} lines", lines.len());
+        assert!(
+            lines.iter().all(|line| line.len() <= LOG_LINE_MAX),
+            "{:?}",
+            lines.iter().map(String::len).collect::<Vec<_>>()
+        );
+        assert_eq!(lines.iter().map(String::len).sum::<usize>(), 100_000);
+    }
+
+    #[tokio::test]
+    async fn stopping_the_children_ends_a_log_that_is_still_being_read() {
+        let _serial = serial().await;
+        let dir = TempDir::new().expect("tempdir");
+        let bin = stub(
+            &dir,
+            r#"trap '' PIPE; echo $$ > "$0.pid"; while true; do echo tick; sleep 0.05; done"#,
+        );
+        let mut rx = exec(&bin)
+            .logs("default", "pod-a", true)
+            .await
+            .expect("start stream");
+        assert_eq!(rx.recv().await.as_deref(), Some("tick"));
+        let pid = pid_of(&bin).await;
+
+        stop_children();
+
+        // The receiver is still held: only the stop can have ended it.
+        assert_gone(&pid).await;
+        let drained = tokio::time::timeout(Duration::from_secs(5), async {
+            while rx.recv().await.is_some() {}
+        })
+        .await;
+        assert!(drained.is_ok(), "the stream ends once kubectl has gone");
+    }
+
+    #[tokio::test]
+    async fn stopping_the_children_ends_a_call_that_is_still_waiting() {
+        let _serial = serial().await;
+        let dir = TempDir::new().expect("tempdir");
+        let bin = stub(&dir, r#"echo $$ > "$0.pid"; exec sleep 30"#);
+        let port = exec(&bin);
+        let call = port.get_json("n", "pods", "p");
+        tokio::pin!(call);
+        let pid = tokio::select! {
+            res = &mut call => panic!("the call finished early: {res:?}"),
+            pid = pid_of(&bin) => pid,
+        };
+
+        stop_children();
+
+        let err = tokio::time::timeout(Duration::from_secs(5), call)
+            .await
+            .expect("the call returns once kubectl has gone")
+            .expect_err("a stopped kubectl is a failure");
+        assert!(err.to_string().contains("terminated by a signal"), "{err}");
+        assert_gone(&pid).await;
+    }
+
+    #[tokio::test]
+    async fn a_child_that_has_ended_is_no_longer_tracked() {
+        let _serial = serial().await;
+        let dir = TempDir::new().expect("tempdir");
+        let bin = stub(&dir, "echo '{}'");
+        let port = exec(&bin);
+
+        port.list_json("", "pods").await.expect("list");
+        collect(port.logs("", "pod-a", false).await.expect("logs")).await;
+
+        // The log's kubectl is collected by its own task, a moment later.
+        for _ in 0..100 {
+            if running().is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("{} children are still tracked", running().len());
     }
 }

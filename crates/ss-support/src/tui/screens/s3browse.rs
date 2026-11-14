@@ -166,7 +166,9 @@ impl S3Browse {
                 .chain(page.next.map(Row::More))
                 .collect(),
             Loaded::Versions(versions) => versions.into_iter().map(Row::Version).collect(),
-            Loaded::Suggestions(_) => return Vec::new(),
+            Loaded::Suggestions(_) | Loaded::Pods(_) | Loaded::NoPodsUnconfirmed(_) => {
+                return Vec::new();
+            }
         };
         self.loaded = true;
         self.error = None;
@@ -464,7 +466,9 @@ impl Screen for S3Browse {
             | Msg::Progress(_)
             | Msg::Warning(_)
             | Msg::Confirm(_)
-            | Msg::RunDone(_) => Vec::new(),
+            | Msg::RunDone(_)
+            | Msg::Lines(..)
+            | Msg::StreamEnded(..) => Vec::new(),
         }
     }
 

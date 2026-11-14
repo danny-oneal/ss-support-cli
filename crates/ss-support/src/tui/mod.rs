@@ -187,6 +187,8 @@ pub(crate) fn install_panic_hook() {
         let silenced = restore_terminal_for_exit();
         previous(info);
         if silenced.is_some() {
+            // No destructor runs from here on.
+            crate::kubectl::stop_children();
             std::process::exit(PANIC_EXIT);
         }
     }));

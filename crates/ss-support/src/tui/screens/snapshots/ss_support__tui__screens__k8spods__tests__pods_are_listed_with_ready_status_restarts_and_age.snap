@@ -1,0 +1,14 @@
+---
+source: crates/ss-support/src/tui/screens/k8spods.rs
+expression: "render_shell(&shell, 80, 10)"
+---
+ ss-support · dev · Pods — default namespace
+  NAME         READY  STATUS            RESTARTS  AGE
+> api-7d9f     2/2    Running           2         2h ago
+  worker-5c2a  0/1    CrashLoopBackOff  41        1d ago
+  migrate-x1   0/0    Succeeded         0         4m ago
+
+
+
+
+ ↑↓ move · enter logs · n namespace · r reload · esc back

@@ -159,7 +159,9 @@ impl App {
 
 /// Runs the CLI on the process's standard streams. The first Ctrl-C,
 /// SIGTERM, or SIGHUP cancels the command; a second one of any kind exits at
-/// once with [`Exit::Interrupted`].
+/// once with [`Exit::Interrupted`]. This is the last thing a process does
+/// before it exits: every kubectl process still running is stopped on the
+/// way out.
 pub async fn run(cli: Cli, services: Services) -> Exit {
     // Installed before anything runs, so no signal takes its default action
     // once the command has started.
@@ -168,14 +170,20 @@ pub async fn run(cli: Cli, services: Services) -> Exit {
         signals.next().await;
         tokio::spawn(async move {
             signals.next().await;
-            // Exiting here skips every destructor, so a terminal the TUI
-            // took over is put back first, and kept from being drawn on
-            // again until the process is gone.
+            // Exiting here skips every destructor, so the kubectl processes
+            // still running are stopped, and a terminal the TUI took over is
+            // put back and kept from being drawn on again until the process
+            // is gone.
+            crate::kubectl::stop_children();
             let _silenced = crate::tui::restore_terminal_for_exit();
             std::process::exit(Exit::Interrupted.code());
         });
     };
-    run_with_interrupt(cli, services, Io::std(), interrupt).await
+    let exit = run_with_interrupt(cli, services, Io::std(), interrupt).await;
+    // A task that would have stopped its kubectl may never run again once
+    // the caller exits.
+    crate::kubectl::stop_children();
+    exit
 }
 
 /// Runs the CLI on `io`, never interrupted, so tests can drive the whole

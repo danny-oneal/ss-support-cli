@@ -127,7 +127,7 @@ pub fn human_size(n: u64) -> String {
 
 /// How long before `now` the time `then` was, in whole minutes, hours, or
 /// days; `unknown` when `then` is not known. Times after `now` count as zero.
-pub(crate) fn age(then: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+pub fn age(then: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
     let Some(then) = then else {
         return "unknown".to_owned();
     };
