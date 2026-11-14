@@ -6,6 +6,10 @@
 > `superpowers:subagent-driven-development` or `superpowers:executing-plans`.
 > Phases 0 and 1 are specified at task granularity here so work can start today.
 
+## Closed (2026-11-13)
+
+Everything this plan and `docs/2026-11-12-finish-roadmap.md` kept in scope has landed, as 0.1.0. The sections below are the record of the original design, not a description of the program; `docs/DESIGN.md` is that.
+
 ## Status and re-sequencing (2026-11-12)
 
 This plan is superseded for everything that has not landed by

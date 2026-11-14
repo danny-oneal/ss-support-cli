@@ -1,22 +1,53 @@
 # ss-support
 
-Support operations CLI for non-production AWS and Kubernetes resources,
-ported from an earlier implementation.
+Support operations for non-production AWS and Kubernetes resources: compare
+and inspect S3 objects and DynamoDB items, follow a record to its
+configuration, read pods and their logs, and, in listed environments only,
+restore an object version or edit an item. Every operation runs from the
+command line (`ss-support run`) and from an interactive TUI (`ss-support`).
 
-## Build
+## Install
+
+From a checkout, with a Rust toolchain (1.88 or newer):
+
+```bash
+cargo install --path crates/ss-support --locked    # puts ss-support in ~/.cargo/bin
+ss-support --version
+```
+
+`--version` shows the package version. A build that is not exactly at the
+tag of that version also shows what git says about it, as in `ss-support
+0.1.0 (0.1.0-3-gabc1234)`.
+
+The Kubernetes screens and `config.drift` need `kubectl` on `PATH`; the AWS
+operations need a working AWS profile. Nothing needs a config file to read;
+writing needs one, see [Writes](#writes) and `docs/configuration.md`.
+
+### Shell completion
+
+```bash
+ss-support completion bash > ~/.local/share/bash-completion/completions/ss-support
+ss-support completion zsh  > ~/.zfunc/_ss-support        # any directory on $fpath
+ss-support completion fish > ~/.config/fish/completions/ss-support.fish
+```
+
+Subcommands, operation ids, and flags are completed. Values, such as bucket
+or table names, are not. Write the script again after upgrading, since it
+lists the operations of the version that wrote it.
+
+## Development
 
 ```bash
 make check                          # fmt + clippy (-D warnings) + tests
+make msrv                           # type-check on the minimum supported Rust
 cargo build --release               # target/release/ss-support
-cargo install --path crates/ss-support      # install ss-support into ~/.cargo/bin
-cargo run -p ss-support -- --version
 ```
 
 Crates: `crates/ss-core` (diff engine, operations layer, ports; no AWS
-dependencies) and `crates/ss-support` (the binary: CLI, AWS adapters, and the
-kubectl adapter).
-`make help` lists every target; `docs/` holds the design notes, testing
-plan, and an example config.
+dependencies) and `crates/ss-support` (the binary: CLI, TUI, AWS adapters,
+and the kubectl adapter). `make help` lists every target. `docs/` holds the
+configuration reference, the design, the testing plan, and an example
+config.
 
 ## CLI
 
@@ -25,6 +56,7 @@ ss-support ops list                                   # every operation
 ss-support ops describe demo.json-diff                # its params, defaults, help
 ss-support run demo.json-diff --left a.json --right b.json -o json
 ss-support presets list                               # saved parameter sets
+ss-support completion bash                            # a completion script
 ```
 
 Global flags work before or after the subcommand.

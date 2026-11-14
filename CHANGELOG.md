@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-13
+
+### Added
+- `ss-support completion <bash|zsh|fish>` prints a completion script for
+  every subcommand, operation, and flag.
+- `--version` says which build it is: the package version, and what git
+  describes when the build is not exactly at the tag of that version.
+- `docs/configuration.md`, a reference for `config.yaml` and
+  `presets.yaml`.
+
+### Changed
+- `docs/DESIGN.md` and `docs/TESTING_PLAN.md` describe this program.
+
 ## [0.1.0-alpha.7] - 2026-11-13
 
 ### Added

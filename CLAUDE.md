@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 *ALWAYS* Ask clarifying questions during the planning stage. Never make assumptions or decisions on your own during the planning phase. Always declare a decision, and again if it changes, during the planning sessions.
 
-`ss-support` is a support-operations CLI for non-production AWS and Kubernetes resources, written in Rust (edition 2024, MSRV 1.88). It is a port of an earlier Go implementation. It has two front-ends over the same operations: the `ss-support run` command line and an interactive TUI (a bare `ss-support` on a terminal).
+`ss-support` is a support-operations CLI for non-production AWS and Kubernetes resources, written in Rust (edition 2024, MSRV 1.88). It has two front-ends over the same operations: the `ss-support run` command line and an interactive TUI (a bare `ss-support` on a terminal).
 
 ## Commands
 
@@ -93,4 +93,4 @@ ratatui + crossterm. `shell.rs` owns a stack of `Screen`s (`screen.rs`: `title`,
 
 ## Docs
 
-`docs/2026-11-07-rust-port-master-plan.md` is the port roadmap (read it before starting a new phase); phase task plans sit beside it. `docs/DESIGN.md` and `docs/TESTING_PLAN.md` describe the original design and still reference the Go implementation.
+`docs/DESIGN.md` describes how the program is built, `docs/TESTING_PLAN.md` what is tested and what is not, and `docs/configuration.md` every config key (a test in `crates/ss-support/tests/docs.rs` loads each of its examples and stops compiling when a config struct gains a field). The dated files in `docs/` are the plans the work was done from; `docs/2026-11-12-finish-roadmap.md` is closed. `ss-support completion <shell>` is generated from `cli::command(registry)`, and the version shown comes from `build.rs` and `version.rs`.
